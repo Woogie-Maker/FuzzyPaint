@@ -37,10 +37,10 @@ triangles are retained.
 8. On **2 Create single-filament file**, use the Balanced preset and create the
    print file. FuzzyPaint runs the installed Bambu Studio slicer automatically
    using the complete print profile stored in the prepared project. The regular
-   Bambu Studio window may remain open. Retractions, wipe-while-retracting and
-   Z-hop type are always forced to this workflow's required values again on a
-   temporary slicing copy — not a toggle on this tab — so older prepared
-   projects do not need the expensive preparation stage repeated.
+   Bambu Studio window may remain open. The same retraction, wipe and Z-hop
+   choices as step 1 are enforced again here, on a temporary slicing copy, so
+   older prepared projects do not need the expensive preparation stage
+   repeated.
 9. The result retains the painted-region toolpath
    segmentation while removing colour swaps and the purge tower.
    Leave **Remove embedded guides, pictures and downloads** enabled. MakerWorld

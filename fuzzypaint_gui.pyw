@@ -361,15 +361,21 @@ class App(tk.Tk):
             text="Remove embedded guides, pictures and downloads (recommended for faster transfer)",
             variable=self.strip_attachments,
         ).grid(row=5, column=0, columnspan=3, sticky="w", pady=(7, 2))
-        ttk.Label(
+        ttk.Checkbutton(
             form,
-            text=(
-                "Retractions, wipe-while-retracting and Z-hop are always set to this "
-                "workflow's required values before automatic slicing."
-            ),
-            foreground="#555555",
-            wraplength=640,
+            text="Disable retractions before automatic slicing (recommended; default)",
+            variable=self.disable_retractions,
         ).grid(row=6, column=0, columnspan=3, sticky="w", pady=(7, 2))
+        ttk.Checkbutton(
+            form,
+            text="Disable wipe while retracting before automatic slicing (recommended; default)",
+            variable=self.disable_wipe,
+        ).grid(row=7, column=0, columnspan=3, sticky="w", pady=(4, 2))
+        ttk.Checkbutton(
+            form,
+            text="Use sloped Z-hop before automatic slicing (recommended; default)",
+            variable=self.force_sloped_z_hop,
+        ).grid(row=8, column=0, columnspan=3, sticky="w", pady=(4, 2))
 
         ttk.Checkbutton(
             tab,
@@ -679,12 +685,9 @@ class App(tk.Tk):
         source = Path(self.gcode_source.get())
         destination = Path(self.gcode_destination.get())
         strip_attachments = self.strip_attachments.get()
-        # Always enforced for this single-filament workflow -- not user-togglable here,
-        # because leaving any of these active would bake in retractions/wipes/lift
-        # behaviour that no longer makes sense once colour changes are removed.
-        disable_retractions = True
-        disable_wipe_while_retracting = True
-        force_sloped_z_hop = True
+        disable_retractions = self.disable_retractions.get()
+        disable_wipe_while_retracting = self.disable_wipe.get()
+        force_sloped_z_hop = self.force_sloped_z_hop.get()
 
         def work():
             started = time.perf_counter()
@@ -737,8 +740,12 @@ class App(tk.Tk):
             summary = (
                 f"Created {destination.name}\n\nProcessing time: {elapsed_text}\n"
                 f"Automatic Bambu Studio slice: {'yes' if automatically_sliced else 'not needed'}\n"
-                f"Retractions/wipe/Z-hop enforced before slicing: "
-                f"{'yes' if automatically_sliced else 'no (already sliced; cannot change slicer behaviour)'}\n"
+                f"Retractions disabled before slicing: "
+                f"{'yes' if automatically_sliced and disable_retractions else 'no'}\n"
+                f"Wipe while retracting disabled before slicing: "
+                f"{'yes' if automatically_sliced and disable_wipe_while_retracting else 'no'}\n"
+                f"Sloped Z-hop forced before slicing: "
+                f"{'yes' if automatically_sliced and force_sloped_z_hop else 'no'}\n"
                 f"Detoured source moves: {len(replacements):,}\n"
                 f"Colour changes removed: {report.toolchanges_removed:,}\n"
                 f"Purge-tower blocks removed: {report.tower_blocks_removed:,}\n"
