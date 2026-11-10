@@ -10,6 +10,18 @@ The version bump happens in the same commit as the change it describes, not as a
 separate afterthought -- that's what let `APP_VERSION` drift and sit at 0.2.6
 through several real changes before this file existed.
 
+## 0.4.1
+
+- Fixed: `SelectableLabel` called `update_idletasks()` (a full-window layout
+  recompute) for every single instance, even ones that obviously fit on one
+  line. With ~66 of these now on screen, that showed up as the whole UI
+  visibly "building itself" piece by piece on startup. Now skips that
+  expensive measurement entirely unless the text could plausibly wrap.
+- Fixed: the window no longer relies on Windows' default placement heuristic
+  (which could relocate it to a second monitor once the taller window no
+  longer fit the first), and instead explicitly centres it on the primary
+  monitor.
+
 ## 0.4.0
 
 - Fixed a real correctness bug in the "keep large flat areas smooth" fuzz-

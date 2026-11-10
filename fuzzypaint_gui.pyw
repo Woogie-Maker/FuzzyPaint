@@ -32,7 +32,7 @@ from gcode_single_filament import collapse_gcode_3mf
 from bambu_cli import archive_has_gcode, slice_project
 
 
-APP_VERSION = "0.4.0"
+APP_VERSION = "0.4.1"
 
 OUTPUT_SUBFOLDER_NAME = "FuzzyPaint Output"
 GITHUB_URL = "https://github.com/Woogie-Maker/FuzzyPaint"
@@ -158,6 +158,18 @@ class SelectableLabel(tk.Text):
         self._resize()
 
     def _resize(self, _event=None) -> None:
+        # update_idletasks() forces Tk to recompute layout for the whole
+        # window, not just this widget -- fine occasionally, but with dozens
+        # of these on screen it turns startup into dozens of full reflows
+        # (visible as the UI "building itself" piece by piece). Most captions
+        # obviously fit on one line without ever measuring that, so only pay
+        # for the expensive, accurate measurement when wrapping is possible.
+        value = self.get("1.0", "end-1c")
+        width = int(self.cget("width") or 0)
+        if "\n" not in value and (width <= 0 or len(value) <= width):
+            if int(self.cget("height")) != 1:
+                self.configure(height=1)
+            return
         self.update_idletasks()
         lines = self.count("1.0", "end", "displaylines")
         height = max(1, lines[0] if lines else 1)
@@ -241,8 +253,15 @@ class App(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
         self.title("FuzzyPaint")
-        self.geometry("900x860")
         self.minsize(800, 680)
+        # Pin an explicit, centred position on the primary monitor instead of
+        # leaving placement to Windows' own default-window-position heuristic,
+        # which can otherwise land the window on a different monitor than
+        # expected once its requested size no longer fits the first one.
+        width, height = 900, 860
+        x = max(0, (self.winfo_screenwidth() - width) // 2)
+        y = max(0, (self.winfo_screenheight() - height) // 3)
+        self.geometry(f"{width}x{height}+{x}+{y}")
         self.job_queue: queue.Queue | None = None
         self.job_button: ttk.Button | None = None
         self.job_done = None
