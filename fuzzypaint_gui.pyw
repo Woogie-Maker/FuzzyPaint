@@ -1,0 +1,836 @@
+"""Two-stage Tkinter front end for FuzzyPaint."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import queue
+import re
+import tempfile
+import threading
+import time
+import zipfile
+from pathlib import Path
+import tkinter as tk
+from tkinter import filedialog, messagebox, ttk
+
+from fuzzypaint import (
+    ConversionError,
+    clean_sliced_output_base,
+    configure_project_for_slicing,
+    convert_3mf,
+    format_report,
+    parse_slots,
+    suggest_prepared_project_name,
+    suggest_print_package_name,
+)
+from gcode_layer_interval_detour import build_interval_detours
+from gcode_single_filament import collapse_gcode_3mf
+from bambu_cli import archive_has_gcode, slice_project
+
+
+APP_VERSION = "0.2.6"
+
+
+PRESETS = {
+    "Balanced — proven settings": (0.24, 0.10, 0.55, 0.21, 0.10, 1.20, 0.00),
+    "Fine detail — slower": (0.24, 0.05, 0.45, 0.21, 0.05, 1.20, 0.00),
+    "Fast — lower resolution": (0.24, 0.20, 0.65, 0.25, 0.20, 1.20, 0.00),
+    "Custom": None,
+}
+
+
+class ToolTip:
+    """Small delayed hover help without adding permanent visual clutter."""
+
+    def __init__(self, widget, text: str) -> None:
+        self.widget = widget
+        self.text = text
+        self.after_id = None
+        self.window = None
+        widget.bind("<Enter>", self._schedule, add="+")
+        widget.bind("<Leave>", self._hide, add="+")
+        widget.bind("<ButtonPress>", self._hide, add="+")
+        widget._fuzzypaint_tooltip = self
+
+    def _schedule(self, _event=None) -> None:
+        self._cancel()
+        self.after_id = self.widget.after(450, self._show)
+
+    def _cancel(self) -> None:
+        if self.after_id is not None:
+            self.widget.after_cancel(self.after_id)
+            self.after_id = None
+
+    def _show(self) -> None:
+        self.after_id = None
+        if self.window is not None:
+            return
+        self.window = tk.Toplevel(self.widget)
+        self.window.wm_overrideredirect(True)
+        self.window.wm_geometry(
+            f"+{self.widget.winfo_rootx() + 18}+{self.widget.winfo_rooty() + 22}"
+        )
+        ttk.Label(
+            self.window,
+            text=self.text,
+            justify="left",
+            wraplength=360,
+            padding=(9, 6),
+            relief="solid",
+            borderwidth=1,
+        ).pack()
+
+    def _hide(self, _event=None) -> None:
+        self._cancel()
+        if self.window is not None:
+            self.window.destroy()
+            self.window = None
+
+
+class App(tk.Tk):
+    def __init__(self) -> None:
+        super().__init__()
+        self.title("FuzzyPaint")
+        self.geometry("900x780")
+        self.minsize(800, 680)
+        self.job_queue: queue.Queue | None = None
+        self.job_button: ttk.Button | None = None
+        self.job_done = None
+
+        outer = ttk.Frame(self, padding=(18, 14))
+        outer.pack(fill="both", expand=True)
+        header = ttk.Frame(outer)
+        header.pack(fill="x")
+        ttk.Label(header, text="FuzzyPaint", font=("Segoe UI", 18, "bold")).pack(side="left")
+        ttk.Button(header, text="About / Help", command=self.show_help).pack(side="right")
+        ttk.Label(
+            outer,
+            text="for Bambu Studio — Turn painted colours into surface texture and single-filament detail.",
+        ).pack(anchor="w", pady=(2, 10))
+
+        self.notebook = ttk.Notebook(outer)
+        self.notebook.pack(fill="both", expand=True)
+        self.prepare_tab = ttk.Frame(self.notebook, padding=16)
+        self.gcode_tab = ttk.Frame(self.notebook, padding=16)
+        self.notebook.add(self.prepare_tab, text="1  Prepare project")
+        self.notebook.add(self.gcode_tab, text="2  Create single-filament file")
+        self._build_prepare_tab()
+        self._build_gcode_tab()
+
+        footer = ttk.Frame(outer)
+        footer.pack(fill="x", pady=(10, 0))
+        self.progress = ttk.Progressbar(footer, mode="indeterminate", length=170)
+        self.progress.pack(side="right")
+        ttk.Label(
+            footer,
+            text="Source files are never overwritten. Inspect the complete Bambu Studio Preview before printing.",
+            foreground="#555555",
+        ).pack(side="left")
+
+    @staticmethod
+    def _file_row(parent, row, label, variable, command) -> None:
+        ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w", pady=7)
+        ttk.Entry(parent, textvariable=variable).grid(row=row, column=1, sticky="ew", padx=(12, 8), pady=7)
+        ttk.Button(parent, text="Browse…", command=command).grid(row=row, column=2, sticky="ew", pady=7)
+
+    @staticmethod
+    def _number_row(parent, row, label, variable, units, hint="") -> None:
+        ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w", pady=5)
+        ttk.Entry(parent, textvariable=variable, width=12).grid(row=row, column=1, sticky="w", padx=(12, 6), pady=5)
+        ttk.Label(parent, text=f"{units}  {hint}".rstrip(), foreground="#555555").grid(row=row, column=2, sticky="w", pady=5)
+
+    def _scrollable_content(self, host) -> ttk.Frame:
+        canvas = tk.Canvas(host, highlightthickness=0, borderwidth=0)
+        scrollbar = ttk.Scrollbar(host, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
+        content = ttk.Frame(canvas, padding=16)
+        window_id = canvas.create_window((0, 0), window=content, anchor="nw")
+
+        def resize_content(event):
+            canvas.itemconfigure(window_id, width=event.width)
+
+        def update_region(_event=None):
+            canvas.configure(scrollregion=canvas.bbox("all"))
+
+        def wheel(event):
+            # bind_all is needed so controls embedded in the canvas can scroll it,
+            # but events from secondary windows (notably About / Help) must not
+            # leak through and move the main form underneath them.
+            try:
+                if event.widget.winfo_toplevel() is not self:
+                    return None
+            except tk.TclError:
+                return None
+            if self.notebook.select() == str(host):
+                canvas.yview_scroll(-1 if event.delta > 0 else 1, "units")
+                return "break"
+            return None
+
+        canvas.bind("<Configure>", resize_content)
+        content.bind("<Configure>", update_region)
+        self.bind_all("<MouseWheel>", wheel, add="+")
+        return content
+
+    @staticmethod
+    def _text_setting_row(parent, row, label, variable) -> None:
+        ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w", pady=5)
+        ttk.Entry(parent, textvariable=variable, width=18).grid(row=row, column=1, sticky="w", padx=(12, 6), pady=5)
+
+    def _build_prepare_tab(self) -> None:
+        tab = self._scrollable_content(self.prepare_tab)
+        tab.columnconfigure(0, weight=1)
+        ttk.Label(
+            tab,
+            text=(
+                "Prepare the painted project for multicolour slicing. A new project is created; "
+                "your original file is left untouched."
+            ),
+            wraplength=760,
+        ).grid(row=0, column=0, sticky="w", pady=(0, 10))
+
+        self.project_source = tk.StringVar()
+        self.project_destination = tk.StringVar()
+        self.project_slots = tk.StringVar(value="2")
+        self.protect_planar = tk.BooleanVar(value=True)
+        self.disable_wipe = tk.BooleanVar(value=True)
+        self.disable_retractions = tk.BooleanVar(value=True)
+        self.force_sloped_z_hop = tk.BooleanVar(value=True)
+        self.strip_prepare_attachments = tk.BooleanVar(value=True)
+        self.prepare_status = tk.StringVar(value="Start by choosing your colour-painted Bambu Studio project.")
+        self.prepare_advanced = tk.BooleanVar(value=False)
+        self.planar_angle = tk.StringVar(value="2.0")
+        self.planar_area = tk.StringVar(value="20.0")
+        self.override_fuzzy = tk.BooleanVar(value=True)
+        self.fuzzy_thickness = tk.StringVar(value="0.25")
+        self.fuzzy_distance = tk.StringVar(value="0.05")
+        self.fuzzy_first_layer = tk.BooleanVar(value=False)
+        self.fuzzy_mode = tk.StringVar(value="displacement")
+        self.fuzzy_noise = tk.StringVar(value="classic")
+        self.fuzzy_octaves = tk.StringVar(value="4")
+        self.fuzzy_persistence = tk.StringVar(value="0.5")
+        self.fuzzy_scale = tk.StringVar(value="1.0")
+
+        form = ttk.LabelFrame(tab, text="Project", padding=12)
+        form.grid(row=1, column=0, sticky="ew")
+        form.columnconfigure(1, weight=1)
+        self._file_row(form, 0, "Colour-painted project", self.project_source, self.choose_project_source)
+        self._file_row(form, 1, "Save prepared copy as", self.project_destination, self.choose_project_destination)
+        fuzz_label = ttk.Frame(form)
+        fuzz_label.grid(row=2, column=0, sticky="w", pady=7)
+        ttk.Label(fuzz_label, text="Add fuzz to painted colour(s)").pack(side="left")
+        help_icon = ttk.Label(fuzz_label, text="  ?", cursor="question_arrow", foreground="#555555")
+        help_icon.pack(side="left")
+        ToolTip(
+            help_icon,
+            "Enter the Bambu filament number used by face painting, such as 2 or 2,4. "
+            "Only colour-painted faces become fuzzy. Separate parts assigned to the same "
+            "filament—such as the vine—are left unchanged.",
+        )
+        ttk.Entry(form, textvariable=self.project_slots).grid(row=2, column=1, sticky="ew", padx=(12, 8), pady=7)
+        ttk.Checkbutton(
+            form,
+            text="Keep large flat areas smooth (recommended for slots and fitting surfaces)",
+            variable=self.protect_planar,
+        ).grid(row=3, column=0, columnspan=3, sticky="w", pady=(7, 2))
+        ttk.Checkbutton(
+            form,
+            text="Disable retractions (recommended for this single-filament workflow)",
+            variable=self.disable_retractions,
+        ).grid(row=4, column=0, columnspan=3, sticky="w", pady=(4, 2))
+        ttk.Checkbutton(
+            form,
+            text="Disable wipe while retracting (recommended for this single-filament workflow)",
+            variable=self.disable_wipe,
+        ).grid(row=5, column=0, columnspan=3, sticky="w", pady=(4, 2))
+        ttk.Checkbutton(
+            form,
+            text="Use sloped Z-hop for every filament (recommended)",
+            variable=self.force_sloped_z_hop,
+        ).grid(row=6, column=0, columnspan=3, sticky="w", pady=(4, 2))
+        ttk.Checkbutton(
+            form,
+            text="Remove embedded guides and downloads from the prepared copy (faster)",
+            variable=self.strip_prepare_attachments,
+        ).grid(row=7, column=0, columnspan=3, sticky="w", pady=(4, 2))
+
+        ttk.Checkbutton(
+            tab,
+            text="Show advanced settings",
+            variable=self.prepare_advanced,
+            command=self._toggle_prepare_advanced,
+        ).grid(row=2, column=0, sticky="w", pady=(10, 2))
+        self.prepare_advanced_frame = ttk.LabelFrame(tab, text="Advanced settings", padding=12)
+        self._number_row(self.prepare_advanced_frame, 0, "Flat-surface angle tolerance", self.planar_angle, "degrees")
+        self._number_row(self.prepare_advanced_frame, 1, "Minimum protected flat area", self.planar_area, "mm²")
+        ttk.Checkbutton(
+            self.prepare_advanced_frame,
+            text="Override fuzzy-skin process settings stored in the output project",
+            variable=self.override_fuzzy,
+            command=self._toggle_fuzzy_settings,
+        ).grid(row=2, column=0, columnspan=3, sticky="w", pady=(8, 3))
+        self.fuzzy_frame = ttk.Frame(self.prepare_advanced_frame)
+        self.fuzzy_frame.grid(row=3, column=0, columnspan=3, sticky="ew")
+        self._number_row(self.fuzzy_frame, 0, "Thickness", self.fuzzy_thickness, "mm")
+        self._number_row(self.fuzzy_frame, 1, "Point distance", self.fuzzy_distance, "mm")
+        ttk.Checkbutton(self.fuzzy_frame, text="Fuzzy skin on first layer", variable=self.fuzzy_first_layer).grid(
+            row=2, column=0, columnspan=3, sticky="w", pady=4
+        )
+        self._text_setting_row(self.fuzzy_frame, 3, "Mode", self.fuzzy_mode)
+        self._text_setting_row(self.fuzzy_frame, 4, "Noise type", self.fuzzy_noise)
+        self._number_row(self.fuzzy_frame, 5, "Noise octaves", self.fuzzy_octaves, "")
+        self._number_row(self.fuzzy_frame, 6, "Noise persistence", self.fuzzy_persistence, "")
+        self._number_row(self.fuzzy_frame, 7, "Noise scale", self.fuzzy_scale, "")
+        self._toggle_fuzzy_settings()
+        self._toggle_prepare_advanced()
+
+        bottom = ttk.Frame(tab)
+        bottom.grid(row=4, column=0, sticky="nsew", pady=(14, 0))
+        bottom.columnconfigure(0, weight=1)
+        ttk.Label(bottom, textvariable=self.prepare_status, wraplength=740).grid(
+            row=0, column=0, columnspan=2, sticky="ew"
+        )
+        self.prepare_button = ttk.Button(bottom, text="Prepare file for slicing", command=self.prepare_project)
+        self.prepare_button.grid(row=1, column=1, sticky="e", pady=(8, 0))
+
+    def _build_gcode_tab(self) -> None:
+        tab = self._scrollable_content(self.gcode_tab)
+        tab.columnconfigure(0, weight=1)
+        ttk.Label(
+            tab,
+            text=(
+                "Choose the prepared FuzzyPaint project. The tool will use Bambu Studio's slicer automatically, "
+                "then keep the painted outlines while changing the result to one spool—without colour changes "
+                "or a purge tower. You can also choose a plate sliced file you exported manually."
+            ),
+            wraplength=790,
+        ).grid(row=0, column=0, sticky="w", pady=(0, 10))
+
+        self.gcode_source = tk.StringVar()
+        self.gcode_destination = tk.StringVar()
+        self.gcode_slots = tk.StringVar(value="2")
+        self.gcode_preset = tk.StringVar(value="Balanced — proven settings")
+        self.detour_side = tk.StringVar(value="Both — complete outline")
+        self.gcode_status = tk.StringVar(value="Choose a prepared project or an exported plate sliced file.")
+        self.gcode_advanced = tk.BooleanVar(value=False)
+        self.detour_depth = tk.StringVar()
+        self.boundary_resolution = tk.StringVar()
+        self.transition_distance = tk.StringVar()
+        self.endpoint_coverage = tk.StringVar()
+        self.minimum_span = tk.StringVar()
+        self.inner_search = tk.StringVar()
+        self.same_layer_gap = tk.StringVar()
+        self.filament_overrides = tk.StringVar()
+        self.strip_attachments = tk.BooleanVar(value=True)
+        self._apply_preset()
+
+        ttk.Label(tab, textvariable=self.gcode_status, wraplength=790).grid(
+            row=1, column=0, sticky="ew", pady=(0, 10)
+        )
+
+        form = ttk.LabelFrame(tab, text="Prepared project or sliced package", padding=12)
+        form.grid(row=2, column=0, sticky="ew")
+        form.columnconfigure(1, weight=1)
+        self._file_row(form, 0, "Prepared project / sliced file", self.gcode_source, self.choose_gcode_source)
+        self._file_row(form, 1, "Save finished print file as", self.gcode_destination, self.choose_gcode_destination)
+        ttk.Label(form, text="Painted colour slot(s) to outline").grid(row=2, column=0, sticky="w", pady=7)
+        ttk.Entry(form, textvariable=self.gcode_slots).grid(row=2, column=1, sticky="ew", padx=(12, 8), pady=7)
+        ttk.Label(form, text="Use Bambu's number: 2 or 2,4", foreground="#555555").grid(row=2, column=2, sticky="w")
+        ttk.Label(form, text="Preset").grid(row=3, column=0, sticky="w", pady=7)
+        preset = ttk.Combobox(form, textvariable=self.gcode_preset, state="readonly", values=tuple(PRESETS))
+        preset.grid(row=3, column=1, columnspan=2, sticky="ew", padx=(12, 0), pady=7)
+        preset.bind("<<ComboboxSelected>>", lambda _event: self._apply_preset())
+        ttk.Label(form, text="Outline direction").grid(row=4, column=0, sticky="w", pady=7)
+        ttk.Combobox(
+            form,
+            textvariable=self.detour_side,
+            state="readonly",
+            values=("Both — complete outline", "Above painted regions", "Below painted regions"),
+        ).grid(row=4, column=1, columnspan=2, sticky="ew", padx=(12, 0), pady=7)
+        ttk.Checkbutton(
+            form,
+            text="Remove embedded guides, pictures and downloads (recommended for faster transfer)",
+            variable=self.strip_attachments,
+        ).grid(row=5, column=0, columnspan=3, sticky="w", pady=(7, 2))
+        ttk.Checkbutton(
+            form,
+            text="Disable retractions before automatic slicing (recommended; default)",
+            variable=self.disable_retractions,
+        ).grid(row=6, column=0, columnspan=3, sticky="w", pady=(7, 2))
+
+        ttk.Checkbutton(
+            tab,
+            text="Show advanced outline settings",
+            variable=self.gcode_advanced,
+            command=self._toggle_gcode_advanced,
+        ).grid(row=3, column=0, sticky="w", pady=(10, 2))
+        self.gcode_advanced_frame = ttk.LabelFrame(tab, text="Advanced outline settings", padding=12)
+        self._number_row(self.gcode_advanced_frame, 0, "Detour depth", self.detour_depth, "mm", "0.24 proven")
+        self._number_row(self.gcode_advanced_frame, 1, "Detection resolution", self.boundary_resolution, "mm", "smaller = slower")
+        self._number_row(self.gcode_advanced_frame, 2, "Transition distance", self.transition_distance, "mm")
+        self._number_row(self.gcode_advanced_frame, 3, "Endpoint coverage", self.endpoint_coverage, "mm")
+        self._number_row(self.gcode_advanced_frame, 4, "Minimum detected span", self.minimum_span, "mm")
+        self._number_row(self.gcode_advanced_frame, 5, "Inner-wall search distance", self.inner_search, "mm")
+        self._number_row(self.gcode_advanced_frame, 6, "Same-layer colour gap", self.same_layer_gap, "mm", "0 disables it")
+        ttk.Label(self.gcode_advanced_frame, text="Paint correction ranges").grid(row=7, column=0, sticky="w", pady=5)
+        ttk.Entry(self.gcode_advanced_frame, textvariable=self.filament_overrides).grid(
+            row=7, column=1, sticky="ew", padx=(12, 6), pady=5
+        )
+        ttk.Label(
+            self.gcode_advanced_frame,
+            text="optional: 61428-61485:2, …",
+            foreground="#555555",
+        ).grid(row=7, column=2, sticky="w", pady=5)
+        self.gcode_advanced_frame.columnconfigure(1, weight=1)
+        self._toggle_gcode_advanced()
+
+        bottom = ttk.Frame(tab)
+        bottom.grid(row=5, column=0, sticky="nsew", pady=(14, 0))
+        bottom.columnconfigure(0, weight=1)
+        ttk.Label(
+            bottom,
+            text=(
+                "After creation: open the finished .gcode.3mf in Bambu Studio and inspect the complete "
+                "Preview before sending it to the printer."
+            ),
+            wraplength=760,
+        ).grid(row=0, column=0, columnspan=2, sticky="w")
+        self.gcode_button = ttk.Button(bottom, text="Create single-filament print file", command=self.process_gcode)
+        self.gcode_button.grid(row=1, column=1, sticky="e", pady=(10, 0))
+
+    def _toggle_prepare_advanced(self) -> None:
+        if self.prepare_advanced.get():
+            self.prepare_advanced_frame.grid(row=3, column=0, sticky="ew", pady=(2, 0))
+        else:
+            self.prepare_advanced_frame.grid_remove()
+
+    def _toggle_fuzzy_settings(self) -> None:
+        state = "normal" if self.override_fuzzy.get() else "disabled"
+        for child in self.fuzzy_frame.winfo_children():
+            try:
+                child.configure(state=state)
+            except tk.TclError:
+                pass
+
+    def _toggle_gcode_advanced(self) -> None:
+        if self.gcode_advanced.get():
+            self.gcode_advanced_frame.grid(row=4, column=0, sticky="ew", pady=(2, 0))
+        else:
+            self.gcode_advanced_frame.grid_remove()
+
+    def show_help(self) -> None:
+        window = tk.Toplevel(self)
+        window.title(f"About FuzzyPaint {APP_VERSION}")
+        window.geometry("680x520")
+        window.minsize(560, 420)
+        window.transient(self)
+        body = ttk.Frame(window, padding=18)
+        body.pack(fill="both", expand=True)
+        ttk.Label(body, text="FuzzyPaint", font=("Segoe UI", 15, "bold")).pack(anchor="w")
+        ttk.Label(body, text="for Bambu Studio", foreground="#555555").pack(anchor="w")
+        ttk.Label(body, text=f"Version {APP_VERSION}", foreground="#555555").pack(anchor="w", pady=(1, 12))
+        ttk.Label(body, text="Why FuzzyPaint exists", font=("Segoe UI", 15, "bold")).pack(anchor="w")
+        help_text = (
+            "FuzzyPaint was created to add fuzzy skin only to the colour-painted areas of a model, "
+            "allowing those details to stand out even when the model is printed with a single colour.\n\n"
+            "If fuzzy skin is not wanted, FuzzyPaint can instead create a physical outline around the "
+            "painted areas. These textured or outlined regions remain easy to identify when painting the "
+            "finished model by hand.\n\n"
+            "On complex models with detailed paintwork, replacing hundreds of filament changes with a "
+            "single-filament print can save hundreds of hours of printing time and a substantial amount "
+            "of purge waste.\n\n"
+            "HOW THE TWO STEPS WORK\n\n"
+            "1. Prepare project\n"
+            "Choose a colour-painted Bambu Studio 3MF project. FuzzyPaint keeps the colour painting "
+            "needed by step 2, adds fuzzy texture to the selected painted colour, and creates a separate "
+            "project ready for multicolour slicing.\n\n"
+            "2. Create a single-filament file\n"
+            "Choose the prepared project and FuzzyPaint will run Bambu Studio's slicer automatically. "
+            "Alternatively, choose a plate sliced file exported manually. FuzzyPaint uses the colour "
+            "boundaries to add physical outline detail, then removes filament changes and "
+            "the purge tower. The finished file prints from one spool. You can use this step without fuzzy skin.\n\n"
+            "Wipe while retracting\n"
+            "The prepared project disables ordinary wipe-while-retracting moves by default. Bambu Studio "
+            "then plans its retractions with wiping disabled before the sliced file is created. Untick the "
+            "option on step 1 if a material or model prints better with wiping enabled.\n\n"
+            "Retractions\n"
+            "Ordinary model retractions are disabled for every virtual filament by default. This is separate "
+            "from wipe while retracting. Untick the option on step 1 if the model or material needs retraction "
+            "to control stringing. Tool-change retractions are removed with their complete colour-change blocks.\n\n"
+            "Sloped Z-hop\n"
+            "Sloped Z-hop is selected by default for the process and every filament. Existing Z-hop heights "
+            "are retained; the option changes only the lift type.\n\n"
+            "Which colour number?\n"
+            "Use the filament slot number shown beside the painted colour in Bambu Studio. Multiple slots "
+            "can be entered as 2,4.\n\n"
+            "Technical detail\n"
+            "Bambu stores colour and fuzzy painting as per-triangle masks inside the 3MF. The first step "
+            "copies selected colour-mask regions into the fuzzy-skin mask. The second step analyses outer-wall "
+            "toolpaths in exported G-code, inserts inward detours at colour boundaries, and collapses the job "
+            "to one physical filament. Other project and print-profile data is retained."
+        )
+        text_frame = ttk.Frame(body)
+        text_frame.pack(fill="both", expand=True)
+        scrollbar = ttk.Scrollbar(text_frame, orient="vertical")
+        text = tk.Text(
+            text_frame,
+            wrap="word",
+            relief="flat",
+            background=window.cget("background"),
+            padx=2,
+            pady=10,
+            yscrollcommand=scrollbar.set,
+        )
+        scrollbar.configure(command=text.yview)
+        text.insert("1.0", help_text)
+        text.configure(state="disabled")
+        text.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+        ttk.Button(body, text="Close", command=window.destroy).pack(anchor="e", pady=(8, 0))
+
+    def _apply_preset(self) -> None:
+        values = PRESETS.get(self.gcode_preset.get())
+        if not values:
+            return
+        variables = (
+            self.detour_depth, self.boundary_resolution, self.transition_distance,
+            self.endpoint_coverage, self.minimum_span, self.inner_search, self.same_layer_gap,
+        )
+        for variable, value in zip(variables, values):
+            variable.set(f"{value:.2f}")
+
+    def choose_project_source(self) -> None:
+        filename = filedialog.askopenfilename(
+            title="Choose a colour-painted project", filetypes=[("3MF projects", "*.3mf"), ("All files", "*.*")]
+        )
+        if filename:
+            self.project_source.set(filename)
+            path = Path(filename)
+            self.project_destination.set(str(path.with_name(suggest_prepared_project_name(path.name))))
+
+    def choose_project_destination(self) -> None:
+        filename = filedialog.asksaveasfilename(
+            title="Save prepared project", defaultextension=".3mf", filetypes=[("3MF projects", "*.3mf")],
+            initialfile=Path(self.project_destination.get()).name if self.project_destination.get() else "model (C2F-Prepped).3mf",
+        )
+        if filename:
+            self.project_destination.set(filename)
+
+    def choose_gcode_source(self) -> None:
+        filename = filedialog.askopenfilename(
+            title="Choose a prepared project or Bambu plate sliced file",
+            filetypes=[("3MF projects and sliced packages", "*.3mf"), ("All files", "*.*")],
+        )
+        if filename:
+            self.gcode_source.set(filename)
+            path = Path(filename)
+            self.gcode_destination.set(str(path.with_name(suggest_print_package_name(path.name))))
+
+    def choose_gcode_destination(self) -> None:
+        filename = filedialog.asksaveasfilename(
+            title="Save processed sliced file", defaultextension=".gcode.3mf",
+            filetypes=[("Bambu sliced packages", "*.gcode.3mf"), ("All files", "*.*")],
+            initialfile=Path(self.gcode_destination.get()).name if self.gcode_destination.get() else "model (C2F-Print).gcode.3mf",
+        )
+        if filename:
+            self.gcode_destination.set(filename)
+
+    @staticmethod
+    def _float(variable: tk.StringVar, label: str, *, positive=False, zero_ok=True) -> float:
+        try:
+            value = float(variable.get())
+        except ValueError as exc:
+            raise ConversionError(f"{label} must be a number") from exc
+        if positive and (value < 0 if zero_ok else value <= 0):
+            raise ConversionError(f"{label} must be {'zero or greater' if zero_ok else 'greater than zero'}")
+        return value
+
+    def _fuzzy_settings(self) -> dict[str, object] | None:
+        if not self.override_fuzzy.get():
+            return None
+        settings = {
+            "fuzzy_skin_thickness": self._float(self.fuzzy_thickness, "Fuzzy thickness", positive=True, zero_ok=False),
+            "fuzzy_skin_point_distance": self._float(self.fuzzy_distance, "Fuzzy point distance", positive=True, zero_ok=False),
+            "fuzzy_skin_first_layer": int(self.fuzzy_first_layer.get()),
+            "fuzzy_skin_mode": self.fuzzy_mode.get().strip(),
+            "fuzzy_skin_noise_type": self.fuzzy_noise.get().strip(),
+            "fuzzy_skin_octaves": int(self._float(self.fuzzy_octaves, "Noise octaves", positive=True, zero_ok=False)),
+            "fuzzy_skin_persistence": self._float(self.fuzzy_persistence, "Noise persistence", positive=True),
+            "fuzzy_skin_scale": self._float(self.fuzzy_scale, "Noise scale", positive=True, zero_ok=False),
+        }
+        if not settings["fuzzy_skin_mode"] or not settings["fuzzy_skin_noise_type"]:
+            raise ConversionError("Fuzzy mode and noise type cannot be empty")
+        return settings
+
+    def prepare_project(self) -> None:
+        if not self.project_source.get().strip() or not self.project_destination.get().strip():
+            messagebox.showerror("Missing file", "Choose both an input and output project.")
+            return
+        try:
+            selected_slots = parse_slots(self.project_slots.get())
+            angle = self._float(self.planar_angle, "Flat-surface angle", positive=True)
+            area = self._float(self.planar_area, "Minimum flat area", positive=True, zero_ok=False)
+            fuzzy_settings = self._fuzzy_settings()
+        except (ConversionError, ValueError) as exc:
+            messagebox.showerror("Invalid setting", str(exc))
+            return
+        destination = Path(self.project_destination.get())
+        source = self.project_source.get()
+        protect_planar = self.protect_planar.get()
+        disable_wipe = self.disable_wipe.get()
+        disable_retractions = self.disable_retractions.get()
+        force_sloped_z_hop = self.force_sloped_z_hop.get()
+        strip_prepare_attachments = self.strip_prepare_attachments.get()
+
+        def work():
+            started = time.perf_counter()
+            report = convert_3mf(
+                source, destination, slots=selected_slots, remove_colour=False,
+                protect_planar=protect_planar, planar_angle_degrees=angle,
+                planar_minimum_area_mm2=area, single_colour=False, fuzzy_settings=fuzzy_settings,
+                disable_wipe_while_retracting=disable_wipe,
+                disable_retractions=disable_retractions,
+                force_sloped_z_hop=force_sloped_z_hop,
+                strip_nonprint_auxiliaries=strip_prepare_attachments,
+            )
+            return report, time.perf_counter() - started
+
+        def done(result):
+            report, elapsed_seconds = result
+            if elapsed_seconds >= 60:
+                minutes, seconds = divmod(elapsed_seconds, 60)
+                elapsed_text = f"{int(minutes)} min {seconds:.1f} sec"
+            else:
+                elapsed_text = f"{elapsed_seconds:.1f} sec"
+            self.prepare_status.set(f"Prepared for slicing:\n{destination}")
+            self.gcode_source.set(str(destination))
+            self.gcode_destination.set(str(destination.with_name(suggest_print_package_name(destination.name))))
+            self.gcode_status.set(
+                "Prepared project selected. Create the single-filament print file when ready."
+            )
+            self.notebook.select(self.gcode_tab)
+            fuzzy_summary = (
+                f"Fuzzy thickness: {fuzzy_settings['fuzzy_skin_thickness']} mm\n"
+                f"Fuzzy point distance: {fuzzy_settings['fuzzy_skin_point_distance']} mm\n\n"
+                if fuzzy_settings else
+                "Fuzzy process settings: preserved from the source project\n\n"
+            )
+            messagebox.showinfo(
+                "Project ready",
+                f"Created {destination.name}\n\nPreparation time: {elapsed_text}\n\n"
+                f"{format_report(report)}\n\n{fuzzy_summary}"
+                "Next, use the second tab to create the print file. FuzzyPaint can now run Bambu Studio's slicer automatically.",
+            )
+
+        self._start_job(self.prepare_button, self.prepare_status, "Preparing project…", work, done)
+
+    @staticmethod
+    def _parse_overrides(text: str) -> list[tuple[int, int, int]]:
+        result = []
+        for value in (item.strip() for item in text.split(",") if item.strip()):
+            match = re.fullmatch(r"(\d+)-(\d+):(\d+)", value)
+            if not match:
+                raise ConversionError("Paint correction ranges must use FIRST-LAST:FILAMENT")
+            first, last, filament = map(int, match.groups())
+            if first < 1 or last < first or filament < 1:
+                raise ConversionError("Paint correction ranges must contain positive, ordered numbers")
+            result.append((first, last, filament - 1))
+        return result
+
+    def process_gcode(self) -> None:
+        if not self.gcode_source.get().strip() or not self.gcode_destination.get().strip():
+            messagebox.showerror("Missing file", "Choose both an input and output sliced file.")
+            return
+        try:
+            slots = parse_slots(self.gcode_slots.get())
+            if slots is None:
+                raise ConversionError("Choose the painted filament slot or slots; 'all' is not valid here")
+            depth = self._float(self.detour_depth, "Detour depth", positive=True, zero_ok=False)
+            resolution = self._float(self.boundary_resolution, "Detection resolution", positive=True, zero_ok=False)
+            transition = self._float(self.transition_distance, "Transition distance", positive=True)
+            coverage = self._float(self.endpoint_coverage, "Endpoint coverage", positive=True)
+            minimum = self._float(self.minimum_span, "Minimum detected span", positive=True)
+            inner_search = self._float(self.inner_search, "Inner-wall search", positive=True, zero_ok=False)
+            gap = self._float(self.same_layer_gap, "Same-layer gap", positive=True)
+            overrides = self._parse_overrides(self.filament_overrides.get())
+        except ConversionError as exc:
+            messagebox.showerror("Invalid setting", str(exc))
+            return
+        side = {"Both — complete outline": "both", "Above painted regions": "upper", "Below painted regions": "lower"}[
+            self.detour_side.get()
+        ]
+        source = Path(self.gcode_source.get())
+        destination = Path(self.gcode_destination.get())
+        strip_attachments = self.strip_attachments.get()
+        disable_retractions = self.disable_retractions.get()
+
+        def work():
+            started = time.perf_counter()
+            automatically_sliced = not archive_has_gcode(source)
+            expected_fuzzy = self._project_fuzzy_settings(source) if automatically_sliced else None
+            with tempfile.TemporaryDirectory(prefix="c2f-slice-", dir=destination.parent) as temporary:
+                sliced_source = source
+                if automatically_sliced:
+                    configured_source = Path(temporary) / "automatic-slice-input.3mf"
+                    configure_project_for_slicing(
+                        source,
+                        configured_source,
+                        disable_retractions=disable_retractions,
+                    )
+                    sliced_source = Path(temporary) / "automatic-slice.3mf"
+                    slice_project(configured_source, sliced_source)
+                replacements = build_interval_detours(
+                    sliced_source, inset_mm=depth, boundary_resolution_mm=resolution,
+                    transition_distance_mm=transition, endpoint_coverage_mm=coverage,
+                    inner_search_mm=inner_search, minimum_span_mm=minimum, same_layer_gap_mm=gap,
+                    detour_side=side, subject_filaments={slot - 1 for slot in slots},
+                    filament_overrides=overrides,
+                )
+                report = collapse_gcode_3mf(
+                    sliced_source,
+                    destination,
+                    line_replacements=replacements,
+                    strip_nonprint_auxiliaries=strip_attachments,
+                )
+            validation = self._validate_sliced_package(destination)
+            if expected_fuzzy is not None:
+                actual_fuzzy = (validation["fuzzy_thickness"], validation["fuzzy_distance"])
+                if any(abs(float(actual) - float(expected)) > 1e-9 for actual, expected in zip(actual_fuzzy, expected_fuzzy)):
+                    raise ConversionError(
+                        "Bambu Studio sliced with different fuzzy settings than the prepared project: "
+                        f"expected {expected_fuzzy[0]} / {expected_fuzzy[1]}, "
+                        f"but G-code contains {actual_fuzzy[0]} / {actual_fuzzy[1]}"
+                    )
+            return replacements, report, validation, time.perf_counter() - started, automatically_sliced
+
+        def done(result):
+            replacements, report, validation, elapsed_seconds, automatically_sliced = result
+            if elapsed_seconds >= 60:
+                minutes, seconds = divmod(elapsed_seconds, 60)
+                elapsed_text = f"{int(minutes)} min {seconds:.1f} sec"
+            else:
+                elapsed_text = f"{elapsed_seconds:.1f} sec"
+            summary = (
+                f"Created {destination.name}\n\nProcessing time: {elapsed_text}\n"
+                f"Automatic Bambu Studio slice: {'yes' if automatically_sliced else 'not needed'}\n"
+                f"Retractions disabled before slicing: "
+                f"{'yes' if automatically_sliced and disable_retractions else 'no'}\n"
+                f"Detoured source moves: {len(replacements):,}\n"
+                f"Colour changes removed: {report.toolchanges_removed:,}\n"
+                f"Purge-tower blocks removed: {report.tower_blocks_removed:,}\n"
+                f"Obsolete purge-tower trips removed: {report.tower_excursions_removed:,}\n"
+                f"Orphaned unretractions removed: {report.orphan_unretractions_removed:,}\n"
+                f"Estimated model filament: {report.filament_weight_g:.2f} g\n"
+                f"Recalculated model time: {report.estimated_model_seconds / 60:.1f} min\n"
+                f"Non-print attachments removed: {report.attachments_removed:,} "
+                f"({report.attachment_bytes_removed / 1_000_000:.1f} MB)\n"
+                f"Package CRC: {validation['crc']}\nEmbedded G-code checksum: {validation['md5']}\n"
+                f"Sliced fuzzy thickness: {validation['fuzzy_thickness']} mm\n"
+                f"Sliced fuzzy point distance: {validation['fuzzy_distance']} mm\n"
+                f"Remaining colour-change blocks: {validation['toolchanges']}"
+            )
+            self.gcode_status.set(f"Ready for Bambu Studio Preview:\n{destination}")
+            messagebox.showinfo("Sliced-file processing complete", summary)
+
+        self._start_job(
+            self.gcode_button,
+            self.gcode_status,
+            "Slicing if needed, then analysing and rebuilding toolpaths…",
+            work,
+            done,
+        )
+
+    @staticmethod
+    def _project_fuzzy_settings(path: Path) -> tuple[str, str] | None:
+        """Read thickness/distance requested by an editable project, if present."""
+        try:
+            with zipfile.ZipFile(path) as archive:
+                settings = json.loads(archive.read("Metadata/project_settings.config"))
+        except (OSError, KeyError, zipfile.BadZipFile, json.JSONDecodeError):
+            return None
+        thickness = settings.get("fuzzy_skin_thickness")
+        distance = settings.get("fuzzy_skin_point_distance")
+        if thickness is None or distance is None:
+            return None
+        return str(thickness), str(distance)
+
+    @staticmethod
+    def _validate_sliced_package(path: Path) -> dict[str, object]:
+        with zipfile.ZipFile(path) as archive:
+            bad = archive.testzip()
+            gcode_name = next((name for name in archive.namelist() if name.lower().endswith(".gcode")), None)
+            if not gcode_name:
+                raise ConversionError("Processed package contains no G-code")
+            data = archive.read(gcode_name)
+            md5_name = next((name for name in archive.namelist() if name.lower().endswith(".gcode.md5")), None)
+            expected = archive.read(md5_name).decode("ascii", "ignore").strip().split()[0] if md5_name else ""
+            actual = hashlib.md5(data).hexdigest()
+            if expected and expected != actual:
+                raise ConversionError("Processed package G-code checksum does not match")
+            startup = data.split(b"; layer num/total_layer_count:", 1)[0]
+            def setting(name: bytes) -> str:
+                match = re.search(rb"(?m)^; " + re.escape(name) + rb" = ([^\r\n]+)", data)
+                return match.group(1).decode("utf-8", "replace").strip() if match else "not recorded"
+            for line in startup.splitlines():
+                stripped = line.strip()
+                ams_match = re.match(rb"^M62[01]\s+S(\d+)A(?:\s|$)", stripped, re.IGNORECASE)
+                tool_match = re.match(rb"^T(\d+)(?:\s*(?:;.*)?)$", stripped, re.IGNORECASE)
+                selection = (
+                    int(ams_match.group(1)) if ams_match else
+                    int(tool_match.group(1)) if tool_match else None
+                )
+                if selection is not None and 0 < selection < 255:
+                    raise ConversionError(
+                        f"Processed package still selects obsolete startup filament {selection + 1}"
+                    )
+            return {
+                "crc": "clean" if bad is None else f"FAILED at {bad}",
+                "md5": "valid" if not expected or expected == actual else "invalid",
+                "toolchanges": data.count(b"; CP TOOLCHANGE START"),
+                "fuzzy_thickness": setting(b"fuzzy_skin_thickness"),
+                "fuzzy_distance": setting(b"fuzzy_skin_point_distance"),
+            }
+
+    def _start_job(self, button, status_variable, status_text, worker, done) -> None:
+        if self.job_queue is not None:
+            messagebox.showwarning("Busy", "Another conversion is already running.")
+            return
+        self.job_queue = queue.Queue()
+        self.job_button = button
+        self.job_done = done
+        button.state(["disabled"])
+        status_variable.set(status_text)
+        self.progress.start(12)
+
+        def run():
+            try:
+                self.job_queue.put(("ok", worker()))
+            except Exception as exc:
+                self.job_queue.put(("error", exc))
+
+        threading.Thread(target=run, daemon=True).start()
+        self.after(100, lambda: self._poll_job(status_variable))
+
+    def _poll_job(self, status_variable) -> None:
+        assert self.job_queue is not None
+        try:
+            result_type, payload = self.job_queue.get_nowait()
+        except queue.Empty:
+            self.after(100, lambda: self._poll_job(status_variable))
+            return
+        button, done = self.job_button, self.job_done
+        self.job_queue = self.job_button = self.job_done = None
+        self.progress.stop()
+        if button is not None:
+            button.state(["!disabled"])
+        if result_type == "error":
+            status_variable.set(f"Failed: {payload}")
+            messagebox.showerror("Conversion failed", str(payload))
+        else:
+            done(payload)
+
+
+if __name__ == "__main__":
+    App().mainloop()

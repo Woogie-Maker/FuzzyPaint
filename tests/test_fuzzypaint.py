@@ -1,0 +1,891 @@
+import tempfile
+import unittest
+import zipfile
+import re
+import json
+import io
+from pathlib import Path
+
+from fuzzypaint import (
+    ConversionError,
+    ConversionReport,
+    PaintNode,
+    clean_sliced_output_base,
+    convert_3mf,
+    configure_project_for_slicing,
+    convert_model_xml,
+    decode_paint_stream,
+    encode_paint_stream,
+    leaf_states,
+    suggest_created_package_name,
+    suggest_prepared_project_name,
+    suggest_print_package_name,
+)
+from gcode_layer_detour import build_detours
+from gcode_layer_interval_detour import build_interval_detours
+from gcode_single_filament import (
+    CollapseReport,
+    _validate_tower_excursions,
+    _find_tower_excursion_ranges,
+    _rewrite_gcode_metadata,
+    _rewrite_model_settings,
+    _rewrite_plate_json,
+    _rewrite_project_settings,
+    _rewrite_sequence,
+    _strip_marked_blocks,
+    strip_nonprint_attachments,
+)
+
+
+class PaintCodecTests(unittest.TestCase):
+    def test_whole_triangle_vectors(self):
+        for state, encoded in [(0, "0"), (1, "4"), (2, "8"), (3, "0c"), (4, "1c"), (17, "ec"), (18, "0fc")]:
+            node = PaintNode(state=state)
+            self.assertEqual(encode_paint_stream(node), encoded)
+            self.assertEqual(decode_paint_stream(encoded), node)
+
+    def test_complex_stream_round_trip(self):
+        raw = "0C0C80C0C30C0C3"
+        tree = decode_paint_stream(raw)
+        self.assertEqual(encode_paint_stream(tree).lower(), raw.lower())
+        self.assertGreater(len(list(leaf_states(tree))), 1)
+
+    def test_rejects_truncated_stream(self):
+        with self.assertRaises(ConversionError):
+            decode_paint_stream("c")
+
+
+class XmlConversionTests(unittest.TestCase):
+    def test_converts_selected_slot_and_removes_colour(self):
+        xml = b'<triangles><triangle v1="0" v2="1" v3="2" paint_color="8"/></triangles>'
+        converted, changed = convert_model_xml(xml, slots={2}, remove_colour=True)
+        self.assertTrue(changed)
+        self.assertIn(b'paint_fuzzy_skin="4"', converted)
+        self.assertNotIn(b"paint_color", converted)
+
+    def test_keeps_colour_when_requested(self):
+        xml = b"<triangle v1='0' v2='1' v3='2' paint_color='4'/>"
+        converted, _ = convert_model_xml(xml, remove_colour=False)
+        self.assertIn(b"paint_color='4'", converted)
+        self.assertIn(b'paint_fuzzy_skin="4"', converted)
+
+    def test_nonmatching_slot_keeps_colour_and_writes_no_fuzzy(self):
+        xml = b'<triangle v1="0" v2="1" v3="2" paint_color="8"/>'
+        converted, _ = convert_model_xml(xml, slots={1}, remove_colour=True)
+        self.assertIn(b'paint_color="8"', converted)
+        self.assertNotIn(b"paint_fuzzy_skin", converted)
+
+    def test_selected_slot_is_removed_without_erasing_other_slots(self):
+        colour_tree = PaintNode(split_code=1, children=(PaintNode(state=1), PaintNode(state=2)))
+        raw = encode_paint_stream(colour_tree)
+        xml = f'<triangle v1="0" v2="1" v3="2" paint_color="{raw}"/>'.encode()
+        converted, _ = convert_model_xml(xml, slots={1}, remove_colour=True)
+        colour_match = re.search(rb'paint_color="([0-9a-f]+)"', converted)
+        fuzzy_match = re.search(rb'paint_fuzzy_skin="([0-9a-f]+)"', converted)
+        self.assertEqual(list(leaf_states(decode_paint_stream(colour_match.group(1).decode()))), [0, 2])
+        self.assertEqual(list(leaf_states(decode_paint_stream(fuzzy_match.group(1).decode()))), [1, 0])
+
+    def test_preserves_existing_fuzzy_on_uncoloured_triangle(self):
+        xml = b'<triangle v1="0" v2="1" v3="2" paint_fuzzy_skin="4"/>'
+        converted, changed = convert_model_xml(xml)
+        self.assertFalse(changed)
+        self.assertEqual(converted, xml)
+
+    def test_planar_protection_withholds_large_coplanar_patch(self):
+        xml = b'''<model><resources><object id="1"><mesh>
+        <vertices>
+          <vertex x="0" y="0" z="0"/><vertex x="10" y="0" z="0"/>
+          <vertex x="10" y="10" z="0"/><vertex x="0" y="10" z="0"/>
+        </vertices><triangles>
+          <triangle v1="0" v2="1" v3="2" paint_color="8"/>
+          <triangle v1="0" v2="2" v3="3" paint_color="8"/>
+        </triangles></mesh></object></resources></model>'''
+        report = ConversionReport()
+        converted, changed = convert_model_xml(
+            xml, slots={2}, protect_planar=True, report=report
+        )
+        self.assertFalse(changed)
+        self.assertNotIn(b"paint_fuzzy_skin", converted)
+        self.assertEqual(report.planar_patches_protected, 1)
+        self.assertEqual(report.planar_triangles_protected, 2)
+        self.assertAlmostEqual(report.planar_area_protected_mm2, 100.0)
+
+    def test_planar_protection_keeps_small_patch_eligible(self):
+        xml = b'''<object id="1"><mesh><vertices>
+          <vertex x="0" y="0" z="0"/><vertex x="2" y="0" z="0"/>
+          <vertex x="0" y="2" z="0"/>
+        </vertices><triangles>
+          <triangle v1="0" v2="1" v3="2" paint_color="8"/>
+        </triangles></mesh></object>'''
+        converted, changed = convert_model_xml(xml, slots={2}, protect_planar=True)
+        self.assertTrue(changed)
+        self.assertIn(b'paint_fuzzy_skin="4"', converted)
+
+
+class ArchiveTests(unittest.TestCase):
+    def test_step_one_explains_when_a_sliced_file_was_selected(self):
+        with tempfile.TemporaryDirectory() as folder:
+            source = Path(folder) / "source.gcode.3mf"
+            output = Path(folder) / "output.3mf"
+            with zipfile.ZipFile(source, "w", zipfile.ZIP_DEFLATED) as archive:
+                archive.writestr(
+                    "3D/Objects/object_1.model",
+                    b'<model><triangle v1="0" v2="1" v3="2"/></model>',
+                )
+                archive.writestr("Metadata/plate_1.gcode", b"G1 X1 Y1\n")
+            with self.assertRaisesRegex(ConversionError, "already-sliced"):
+                convert_3mf(source, output)
+
+    def test_tower_trip_removal_also_removes_its_orphaned_unretraction(self):
+        source = io.BytesIO(b"""; CP TOOLCHANGE START
+G1 E-2
+; CP TOOLCHANGE END
+G1 X220 Y220
+; WIPE_START
+G1 X219 Y220 E-.76
+; WIPE_END
+G1 E-.04 F1800
+; OBJECT_ID: 1
+G1 X100 Y100 F30000
+G1 Z.2
+G1 E.8 F1800
+; FEATURE: Outer wall
+G1 X101 Y100 E.1
+""")
+        destination = io.BytesIO()
+        report = CollapseReport()
+        _strip_marked_blocks(source, destination, report, skip_ranges=[(4, 8)])
+        result = destination.getvalue()
+        self.assertIn(b"G1 X100 Y100 F30000", result)
+        self.assertNotIn(b"G1 E.8 F1800", result)
+        self.assertIn(b"G1 X101 Y100 E.1", result)
+        self.assertEqual(report.orphan_unretractions_removed, 1)
+
+    def test_travel_only_tower_range_keeps_following_unretraction(self):
+        source = io.BytesIO(b"""; CP TOOLCHANGE START
+G1 E-2
+; CP TOOLCHANGE END
+G1 X220 Y220
+; OBJECT_ID: 1
+G1 X100 Y100 F30000
+G1 Z.2
+G1 E.8 F1800
+; FEATURE: Outer wall
+G1 X101 Y100 E.1
+""")
+        destination = io.BytesIO()
+        report = CollapseReport()
+        _strip_marked_blocks(source, destination, report, skip_ranges=[(4, 4)])
+        result = destination.getvalue()
+        self.assertIn(b"G1 E.8 F1800", result)
+        self.assertEqual(report.orphan_unretractions_removed, 0)
+
+    def test_finds_unmarked_travel_wrapping_a_wipe_tower(self):
+        gcode = b"""G90
+G1 X100 Y130
+; WIPE_END
+G1 X220 Y220
+; FEATURE: Prime tower
+; WIPE_TOWER_START
+G1 X225 Y225 E1
+; WIPE_TOWER_END
+; CP TOOLCHANGE START
+G1 X220 Y220
+; CP TOOLCHANGE END
+; WIPE_START
+G1 X219 Y220 E-.8
+; WIPE_END
+; OBJECT_ID: 1
+G1 X101 Y131
+"""
+        self.assertEqual(_find_tower_excursion_ranges(io.BytesIO(gcode)), [(4, 14)])
+
+    def test_finds_departure_when_tower_starts_inside_toolchange_block(self):
+        gcode = b"""G90
+; OBJECT_ID: 1
+; FEATURE: Outer wall
+G1 X100 Y130 E.1
+G1 X220 Y220
+; FEATURE: Prime tower
+; CP TOOLCHANGE START
+; WIPE_TOWER_START
+G1 X225 Y225 E1
+; WIPE_TOWER_END
+; CP TOOLCHANGE END
+; FEATURE: Prime tower
+; WIPE_TOWER_START
+G1 X224 Y224 E1
+; WIPE_TOWER_END
+; OBJECT_ID: 1
+G1 X101 Y131
+"""
+        self.assertEqual(_find_tower_excursion_ranges(io.BytesIO(gcode)), [(5, 15)])
+
+    def test_tower_validation_allows_tower_layers_without_colour_changes(self):
+        report = CollapseReport(
+            toolchanges_removed=112,
+            tower_blocks_removed=118,
+            tower_excursions_removed=118,
+        )
+        _validate_tower_excursions(report)
+
+    def test_tower_validation_rejects_an_unmatched_standalone_block(self):
+        report = CollapseReport(
+            toolchanges_removed=112,
+            tower_blocks_removed=118,
+            tower_excursions_removed=117,
+        )
+        with self.assertRaisesRegex(
+            ConversionError, "117 journeys for 118 standalone prime-tower blocks"
+        ):
+            _validate_tower_excursions(report)
+
+    def test_slim_package_keeps_print_data_and_thumbnails(self):
+        with tempfile.TemporaryDirectory() as folder:
+            source = Path(folder) / "source.gcode.3mf"
+            output = Path(folder) / "slim.gcode.3mf"
+            with zipfile.ZipFile(source, "w", zipfile.ZIP_DEFLATED) as archive:
+                archive.writestr("Metadata/plate_1.gcode", b"G1 X1 Y1\n")
+                archive.writestr("Metadata/project_settings.config", b"{}")
+                archive.writestr("Auxiliaries/.thumbnails/thumbnail.png", b"thumb")
+                archive.writestr("Auxiliaries/Others/manual.pdf", b"manual")
+            removed, removed_bytes = strip_nonprint_attachments(source, output)
+            self.assertEqual((removed, removed_bytes), (1, 6))
+            with zipfile.ZipFile(output) as archive:
+                self.assertIn("Metadata/plate_1.gcode", archive.namelist())
+                self.assertIn("Metadata/project_settings.config", archive.namelist())
+                self.assertIn("Auxiliaries/.thumbnails/thumbnail.png", archive.namelist())
+                self.assertNotIn("Auxiliaries/Others/manual.pdf", archive.namelist())
+
+    def test_fuzzy_process_settings_are_written_without_losing_other_settings(self):
+        with tempfile.TemporaryDirectory() as folder:
+            source = Path(folder) / "source.3mf"
+            output = Path(folder) / "output.3mf"
+            model = b'<model><triangle v1="0" v2="1" v3="2" paint_color="8"/></model>'
+            with zipfile.ZipFile(source, "w", zipfile.ZIP_DEFLATED) as archive:
+                archive.writestr("3D/Objects/object_1.model", model)
+                archive.writestr(
+                    "Metadata/project_settings.config",
+                    json.dumps({"keep": "yes", "fuzzy_skin_thickness": "0.1"}),
+                )
+            convert_3mf(
+                source,
+                output,
+                fuzzy_settings={
+                    "fuzzy_skin_thickness": 0.3,
+                    "fuzzy_skin_point_distance": 0.8,
+                },
+            )
+            with zipfile.ZipFile(output) as archive:
+                settings = json.loads(archive.read("Metadata/project_settings.config"))
+            self.assertEqual(settings["keep"], "yes")
+            self.assertEqual(settings["fuzzy_skin_thickness"], "0.3")
+            self.assertEqual(settings["fuzzy_skin_point_distance"], "0.8")
+            process_overrides = set(
+                settings["different_settings_to_system"][0].split(";")
+            )
+            self.assertEqual(
+                process_overrides,
+                {"fuzzy_skin_thickness", "fuzzy_skin_point_distance"},
+            )
+
+    def test_disables_wipe_for_every_filament_without_changing_other_settings(self):
+        with tempfile.TemporaryDirectory() as folder:
+            source = Path(folder) / "source.3mf"
+            output = Path(folder) / "output.3mf"
+            model = b'<model><triangle v1="0" v2="1" v3="2" paint_color="8"/></model>'
+            settings = {
+                "wipe": ["1", "1"],
+                "filament_wipe": ["0", "nil", "1"],
+                "filament_settings_id": ["PLA", "PETG", "TPU"],
+                "different_settings_to_system": ["keep_process", "", "keep_filament", "", "keep_printer"],
+                "wipe_distance": ["2", "3"],
+                "retraction_length": ["0.8", "0.4"],
+                "unrelated": "preserved",
+            }
+            with zipfile.ZipFile(source, "w", zipfile.ZIP_DEFLATED) as archive:
+                archive.writestr("3D/Objects/object_1.model", model)
+                archive.writestr("Metadata/project_settings.config", json.dumps(settings))
+            report = convert_3mf(
+                source, output, disable_wipe_while_retracting=True
+            )
+            with zipfile.ZipFile(output) as archive:
+                result = json.loads(archive.read("Metadata/project_settings.config"))
+            self.assertTrue(report.wipe_while_retracting_disabled)
+            self.assertEqual(result["wipe"], ["0", "0"])
+            self.assertEqual(result["filament_wipe"], ["0", "0", "0"])
+            self.assertEqual(result["wipe_distance"], ["2", "3"])
+            self.assertEqual(result["retraction_length"], ["0.8", "0.4"])
+            self.assertEqual(result["unrelated"], "preserved")
+            differences = result["different_settings_to_system"]
+            self.assertEqual(set(differences[0].split(";")), {"keep_process", "wipe"})
+            self.assertEqual(differences[1], "filament_wipe")
+            self.assertEqual(
+                set(differences[2].split(";")), {"filament_wipe", "keep_filament"}
+            )
+            self.assertEqual(differences[3], "filament_wipe")
+            self.assertEqual(differences[4], "keep_printer")
+
+    def test_disables_retractions_for_process_and_every_filament(self):
+        with tempfile.TemporaryDirectory() as folder:
+            source = Path(folder) / "source.3mf"
+            output = Path(folder) / "output.3mf"
+            model = b'<model><triangle v1="0" v2="1" v3="2" paint_color="8"/></model>'
+            settings = {
+                "filament_settings_id": ["PLA", "PETG"],
+                "different_settings_to_system": ["keep_process", "", "keep_filament", "keep_printer"],
+                "retraction_length": ["0.8", "0.6"],
+                "filament_retraction_length": ["nil", "0.4", "0.7", "nil"],
+                "use_firmware_retraction": "1",
+                "retraction_speed": ["30", "40"],
+                "retract_length_toolchange": ["2", "2"],
+            }
+            with zipfile.ZipFile(source, "w", zipfile.ZIP_DEFLATED) as archive:
+                archive.writestr("3D/Objects/object_1.model", model)
+                archive.writestr("Metadata/project_settings.config", json.dumps(settings))
+            report = convert_3mf(source, output, disable_retractions=True)
+            with zipfile.ZipFile(output) as archive:
+                result = json.loads(archive.read("Metadata/project_settings.config"))
+            self.assertTrue(report.retractions_disabled)
+            self.assertEqual(result["retraction_length"], ["0", "0"])
+            self.assertEqual(result["filament_retraction_length"], ["0", "0", "0", "0"])
+            self.assertEqual(result["use_firmware_retraction"], "0")
+            self.assertEqual(result["retraction_speed"], ["30", "40"])
+            self.assertEqual(result["retract_length_toolchange"], ["2", "2"])
+            differences = result["different_settings_to_system"]
+            self.assertEqual(
+                set(differences[0].split(";")),
+                {"keep_process", "retraction_length", "use_firmware_retraction"},
+            )
+            self.assertEqual(differences[1], "filament_retraction_length")
+            self.assertEqual(
+                set(differences[2].split(";")),
+                {"filament_retraction_length", "keep_filament"},
+            )
+            self.assertEqual(differences[3], "keep_printer")
+
+    def test_slicing_copy_can_disable_retractions_without_touching_model(self):
+        with tempfile.TemporaryDirectory() as folder:
+            source = Path(folder) / "prepared.3mf"
+            output = Path(folder) / "slice-input.3mf"
+            model = b'<model><triangle v1="0" v2="1" v3="2" paint_fuzzy_skin="4"/></model>'
+            settings = {
+                "filament_settings_id": ["PLA", "PETG"],
+                "different_settings_to_system": ["", "", "", ""],
+                "retraction_length": ["0.8", "0.6"],
+                "filament_retraction_length": ["nil", "0.4", "0.7", "nil"],
+                "use_firmware_retraction": "1",
+            }
+            with zipfile.ZipFile(source, "w", zipfile.ZIP_DEFLATED) as archive:
+                archive.writestr("3D/Objects/object_1.model", model)
+                archive.writestr("Metadata/project_settings.config", json.dumps(settings))
+                archive.writestr("Auxiliaries/.thumbnails/thumbnail.png", b"thumbnail")
+            configure_project_for_slicing(source, output, disable_retractions=True)
+            with zipfile.ZipFile(output) as archive:
+                result = json.loads(archive.read("Metadata/project_settings.config"))
+                self.assertEqual(archive.read("3D/Objects/object_1.model"), model)
+                self.assertEqual(
+                    archive.read("Auxiliaries/.thumbnails/thumbnail.png"), b"thumbnail"
+                )
+            self.assertEqual(result["retraction_length"], ["0", "0"])
+            self.assertEqual(result["filament_retraction_length"], ["0", "0", "0", "0"])
+            self.assertEqual(result["use_firmware_retraction"], "0")
+
+    def test_forces_sloped_z_hop_without_changing_heights_or_retraction(self):
+        with tempfile.TemporaryDirectory() as folder:
+            source = Path(folder) / "source.3mf"
+            output = Path(folder) / "output.3mf"
+            model = b'<model><triangle v1="0" v2="1" v3="2" paint_color="8"/></model>'
+            settings = {
+                "z_hop_types": ["Auto Lift", "Normal Lift"],
+                "filament_z_hop_types": ["nil", "Auto Lift", "Slope Lift"],
+                "filament_settings_id": ["PLA", "PETG", "TPU"],
+                "different_settings_to_system": ["", "", "", "", ""],
+                "z_hop": ["0.4", "0"],
+                "filament_z_hop": ["0.6", "nil", "0.2"],
+                "retraction_length": ["0.8", "0.4"],
+                "unrelated": "preserved",
+            }
+            with zipfile.ZipFile(source, "w", zipfile.ZIP_DEFLATED) as archive:
+                archive.writestr("3D/Objects/object_1.model", model)
+                archive.writestr("Metadata/project_settings.config", json.dumps(settings))
+            report = convert_3mf(source, output, force_sloped_z_hop=True)
+            with zipfile.ZipFile(output) as archive:
+                result = json.loads(archive.read("Metadata/project_settings.config"))
+            self.assertTrue(report.sloped_z_hop_enabled)
+            self.assertEqual(result["z_hop_types"], ["Slope Lift", "Slope Lift"])
+            self.assertEqual(
+                result["filament_z_hop_types"],
+                ["Slope Lift", "Slope Lift", "Slope Lift"],
+            )
+            self.assertEqual(result["z_hop"], ["0.4", "0"])
+            self.assertEqual(result["filament_z_hop"], ["0.6", "nil", "0.2"])
+            self.assertEqual(result["retraction_length"], ["0.8", "0.4"])
+            self.assertEqual(result["unrelated"], "preserved")
+            differences = result["different_settings_to_system"]
+            self.assertEqual(differences[0], "z_hop_types")
+            self.assertEqual(differences[1:4], ["filament_z_hop_types"] * 3)
+
+    def test_archive_round_trip_preserves_other_members(self):
+        with tempfile.TemporaryDirectory() as folder:
+            source = Path(folder) / "source.3mf"
+            output = Path(folder) / "output.3mf"
+            model = b'<model><triangle v1="0" v2="1" v3="2" paint_color="8"/></model>'
+            with zipfile.ZipFile(source, "w", zipfile.ZIP_DEFLATED) as archive:
+                archive.writestr("3D/Objects/object_1.model", model)
+                archive.writestr("Metadata/project_settings.config", b'{"example":true}')
+            report = convert_3mf(source, output)
+            self.assertEqual(report.fuzzy_triangles_written, 1)
+            with zipfile.ZipFile(output) as archive:
+                self.assertEqual(archive.read("Metadata/project_settings.config"), b'{"example":true}')
+                converted = archive.read("3D/Objects/object_1.model")
+                self.assertIn(b'paint_fuzzy_skin="4"', converted)
+
+    def test_prepared_copy_can_drop_nonprint_auxiliaries_but_keep_thumbnails(self):
+        with tempfile.TemporaryDirectory() as folder:
+            source = Path(folder) / "source.3mf"
+            output = Path(folder) / "output.3mf"
+            model = b'<model><triangle v1="0" v2="1" v3="2" paint_color="8"/></model>'
+            with zipfile.ZipFile(source, "w", zipfile.ZIP_DEFLATED) as archive:
+                archive.writestr("3D/Objects/object_1.model", model)
+                archive.writestr("Auxiliaries/Assembly Guide/manual.pdf", b"guide")
+                archive.writestr("Auxiliaries/.thumbnails/thumbnail.png", b"thumb")
+            report = convert_3mf(source, output, strip_nonprint_auxiliaries=True)
+            self.assertEqual(report.attachments_removed, 1)
+            self.assertEqual(report.attachment_bytes_removed, 5)
+            with zipfile.ZipFile(output) as archive:
+                self.assertNotIn("Auxiliaries/Assembly Guide/manual.pdf", archive.namelist())
+                self.assertEqual(
+                    archive.read("Auxiliaries/.thumbnails/thumbnail.png"), b"thumb"
+                )
+
+    def test_single_colour_output_keeps_fuzzy_and_remaps_parts(self):
+        with tempfile.TemporaryDirectory() as folder:
+            source = Path(folder) / "source.3mf"
+            output = Path(folder) / "single.3mf"
+            model = b'<model><triangle v1="0" v2="1" v3="2" paint_color="8"/></model>'
+            settings = b'''<config><object id="1">
+              <metadata key="extruder" value="2"/>
+              <part id="1"><metadata key="extruder" value="2"/></part>
+            </object></config>'''
+            with zipfile.ZipFile(source, "w", zipfile.ZIP_DEFLATED) as archive:
+                archive.writestr("3D/Objects/object_1.model", model)
+                archive.writestr("Metadata/model_settings.config", settings)
+                archive.writestr("Metadata/project_settings.config", b'{"keep":true}')
+            report = convert_3mf(source, output, slots={2}, single_colour=True)
+            self.assertEqual(report.single_colour_attributes_removed, 1)
+            self.assertEqual(report.single_colour_assignments_remapped, 2)
+            with zipfile.ZipFile(output) as archive:
+                converted = archive.read("3D/Objects/object_1.model")
+                remapped = archive.read("Metadata/model_settings.config")
+                self.assertIn(b'paint_fuzzy_skin="4"', converted)
+                self.assertNotIn(b"paint_color", converted)
+                self.assertNotIn(b'value="2"', remapped)
+                self.assertEqual(archive.read("Metadata/project_settings.config"), b'{"keep":true}')
+
+    def test_single_spool_segmented_keeps_regions_and_removes_purge_costs(self):
+        with tempfile.TemporaryDirectory() as folder:
+            source = Path(folder) / "source.3mf"
+            output = Path(folder) / "segmented.3mf"
+            model = b'<model><triangle v1="0" v2="1" v3="2" paint_color="8"/></model>'
+            settings = {
+                "enable_prime_tower": "1",
+                "flush_volumes_matrix": ["0", "123", "143", "0"],
+                "flush_volumes_vector": ["140", "140", "140", "140"],
+                "filament_minimal_purge_on_wipe_tower": ["15", "15"],
+                "unrelated": "preserved",
+            }
+            with zipfile.ZipFile(source, "w", zipfile.ZIP_DEFLATED) as archive:
+                archive.writestr("3D/Objects/object_1.model", model)
+                archive.writestr("Metadata/project_settings.config", json.dumps(settings))
+            report = convert_3mf(
+                source, output, slots={2}, single_spool_segmented=True
+            )
+            self.assertEqual(report.single_spool_pairs_zeroed, 2)
+            with zipfile.ZipFile(output) as archive:
+                converted = archive.read("3D/Objects/object_1.model")
+                result = json.loads(archive.read("Metadata/project_settings.config"))
+                self.assertIn(b'paint_color="8"', converted)
+                self.assertIn(b'paint_fuzzy_skin="4"', converted)
+                self.assertEqual(result["enable_prime_tower"], "0")
+                self.assertEqual(result["flush_volumes_matrix"], ["0", "0", "0", "0"])
+                self.assertEqual(result["unrelated"], "preserved")
+
+
+class LiteralDetourTests(unittest.TestCase):
+    def test_cross_layer_colour_boundary_creates_in_span_out_path(self):
+        gcode = b"""; CHANGE_LAYER
+; OBJECT_ID: 1
+T0
+; FEATURE: Outer wall
+G1 X1 Y0 E1
+; FEATURE: Inner wall
+G1 X1 Y0.5 E1
+; CHANGE_LAYER
+T1
+G0 X0 Y0
+; FEATURE: Outer wall
+G1 X1 Y0 E1
+G0 X0 Y0.5
+; FEATURE: Inner wall
+G1 X1 Y0.5 E1
+"""
+        with tempfile.TemporaryDirectory() as folder:
+            source = Path(folder) / "source.gcode.3mf"
+            with zipfile.ZipFile(source, "w", zipfile.ZIP_DEFLATED) as archive:
+                archive.writestr("Metadata/plate_1.gcode", gcode)
+            replacements = build_detours(source, inset_mm=0.24)
+
+        self.assertEqual(len(replacements), 1)
+        emitted = next(iter(replacements.values())).decode()
+        self.assertIn("X0.00000 Y0.24000", emitted)
+        self.assertIn("X1.00000 Y0.24000", emitted)
+        self.assertIn("X1.00000 Y0.00000", emitted)
+        self.assertIn("FuzzyPaint detour in", emitted)
+        self.assertIn("FuzzyPaint inset span", emitted)
+        self.assertIn("FuzzyPaint detour out", emitted)
+
+    def test_short_upper_island_moves_detour_to_longer_lower_run(self):
+        gcode = b"""; CHANGE_LAYER
+; OBJECT_ID: 1
+T0
+; FEATURE: Outer wall
+G1 X2 Y0 E2
+G0 X0 Y0.5
+; FEATURE: Inner wall
+G1 X2 Y0.5 E2
+; CHANGE_LAYER
+T1
+G0 X0.6 Y0
+; FEATURE: Outer wall
+G1 X1.4 Y0 E0.8
+G0 X0.6 Y0.5
+; FEATURE: Inner wall
+G1 X1.4 Y0.5 E0.8
+"""
+        with tempfile.TemporaryDirectory() as folder:
+            source = Path(folder) / "source.gcode.3mf"
+            with zipfile.ZipFile(source, "w", zipfile.ZIP_DEFLATED) as archive:
+                archive.writestr("Metadata/plate_1.gcode", gcode)
+            replacements = build_detours(source, inset_mm=0.24)
+
+        self.assertEqual(len(replacements), 1)
+        emitted = next(iter(replacements.values())).decode()
+        self.assertIn("X2.00000 Y0.24000", emitted)
+        self.assertNotIn("X1.40000 Y0.24000", emitted)
+
+    def test_submillimetre_endpoint_overlap_is_detected_by_sampling(self):
+        gcode = b"""; CHANGE_LAYER
+; OBJECT_ID: 1
+T0
+G0 X1.9 Y0
+; FEATURE: Outer wall
+G1 X2.1 Y0 E0.2
+G0 X1.9 Y0.5
+; FEATURE: Inner wall
+G1 X2.1 Y0.5 E0.2
+; CHANGE_LAYER
+T1
+G0 X0 Y0
+; FEATURE: Outer wall
+G1 X2 Y0 E2
+G0 X0 Y0.5
+; FEATURE: Inner wall
+G1 X2 Y0.5 E2
+"""
+        with tempfile.TemporaryDirectory() as folder:
+            source = Path(folder) / "source.gcode.3mf"
+            with zipfile.ZipFile(source, "w", zipfile.ZIP_DEFLATED) as archive:
+                archive.writestr("Metadata/plate_1.gcode", gcode)
+            replacements = build_detours(
+                source, inset_mm=0.24, boundary_resolution_mm=0.10
+            )
+
+        self.assertEqual(len(replacements), 1)
+        self.assertIn(
+            "FuzzyPaint detour in",
+            next(iter(replacements.values())).decode(),
+        )
+
+    def test_interval_clipping_does_not_shift_the_whole_upper_segment(self):
+        gcode = b"""; CHANGE_LAYER
+; OBJECT_ID: 1
+T0
+G0 X0.9 Y0
+; FEATURE: Outer wall
+G1 X1.1 Y0 E0.2
+G0 X0.9 Y0.5
+; FEATURE: Inner wall
+G1 X1.1 Y0.5 E0.2
+; CHANGE_LAYER
+T1
+G0 X0 Y0
+; FEATURE: Outer wall
+G1 X2 Y0 E2
+G0 X0 Y0.5
+; FEATURE: Inner wall
+G1 X2 Y0.5 E2
+"""
+        with tempfile.TemporaryDirectory() as folder:
+            source = Path(folder) / "source.gcode.3mf"
+            with zipfile.ZipFile(source, "w", zipfile.ZIP_DEFLATED) as archive:
+                archive.writestr("Metadata/plate_1.gcode", gcode)
+            replacements = build_interval_detours(
+                source, inset_mm=0.24, boundary_resolution_mm=0.10
+            )
+
+        emitted = next(iter(replacements.values())).decode().splitlines()
+        inset_x = [
+            float(re.search(r" X([0-9.]+)", line).group(1))
+            for line in emitted if "clipped inset span" in line
+        ]
+        # The physical transition extends beyond the colour core, but the
+        # detour still leaves unmodified path at both ends of this 2 mm line.
+        self.assertGreater(min(inset_x), 0.0)
+        self.assertLessEqual(max(inset_x), 2.0)
+        inset_y = [
+            float(re.search(r" Y([0-9.]+)", line).group(1))
+            for line in emitted if "clipped inset span" in line
+        ]
+        self.assertTrue(any(0.0 < value < 0.24 for value in inset_y))
+        self.assertLess(inset_y[0], 0.05)
+        self.assertLess(inset_y[-1], 0.05)
+
+    def test_same_layer_colour_interface_creates_endpoint_channel(self):
+        gcode = b"""; CHANGE_LAYER
+; OBJECT_ID: 1
+T0
+; FEATURE: Outer wall
+G1 X1 Y0 E1
+T1
+G0 X1.4 Y0
+; FEATURE: Outer wall
+G1 X2.4 Y0 E1
+"""
+        with tempfile.TemporaryDirectory() as folder:
+            source = Path(folder) / "source.gcode.3mf"
+            with zipfile.ZipFile(source, "w", zipfile.ZIP_DEFLATED) as archive:
+                archive.writestr("Metadata/plate_1.gcode", gcode)
+            replacements = build_interval_detours(
+                source, same_layer_gap_mm=0.08
+            )
+
+        self.assertEqual(len(replacements), 2)
+        emitted = b"".join(replacements.values()).decode()
+        self.assertIn("X0.96000 Y0.00000", emitted)
+        self.assertIn("X1.44000 Y0.00000", emitted)
+        self.assertIn("FuzzyPaint same-layer channel", emitted)
+
+    def test_targeted_lower_mode_detours_line_below_opposite_colour(self):
+        gcode = b"""; CHANGE_LAYER
+; OBJECT_ID: 1
+T0
+; FEATURE: Outer wall
+G1 X1 Y0 E1
+G0 X0 Y0.5
+; FEATURE: Inner wall
+G1 X1 Y0.5 E1
+; CHANGE_LAYER
+T1
+G0 X0 Y0
+; FEATURE: Outer wall
+G1 X1 Y0 E1
+G0 X0 Y0.5
+; FEATURE: Inner wall
+G1 X1 Y0.5 E1
+"""
+        with tempfile.TemporaryDirectory() as folder:
+            source = Path(folder) / "source.gcode.3mf"
+            with zipfile.ZipFile(source, "w", zipfile.ZIP_DEFLATED) as archive:
+                archive.writestr("Metadata/plate_1.gcode", gcode)
+            replacements = build_interval_detours(
+                source,
+                detour_side="lower",
+                target_layers={1},
+                same_layer_gap_mm=0,
+            )
+
+        self.assertEqual(len(replacements), 1)
+        self.assertLess(next(iter(replacements)), 10)
+        emitted = next(iter(replacements.values())).decode()
+        self.assertIn("FuzzyPaint tapered detour in", emitted)
+        self.assertIn("Y0.24000", emitted)
+        connector_lines = [line for line in emitted.splitlines() if "tapered detour" in line]
+        self.assertTrue(connector_lines)
+        self.assertTrue(all(line.startswith("G0 ") and " E" not in line for line in connector_lines))
+        extrusion = sum(float(value) for value in re.findall(r"\bE([0-9.]+)", emitted))
+        self.assertAlmostEqual(extrusion, 1.0, places=5)
+
+    def test_both_mode_detours_selected_filament_above_and_below_patch(self):
+        gcode = b"""; CHANGE_LAYER
+; OBJECT_ID: 1
+T1
+; FEATURE: Outer wall
+G1 X1 Y0 E1
+G0 X0 Y0.5
+; FEATURE: Inner wall
+G1 X1 Y0.5 E1
+; CHANGE_LAYER
+T0
+G0 X0 Y0
+; FEATURE: Outer wall
+G1 X1 Y0 E1
+G0 X0 Y0.5
+; FEATURE: Inner wall
+G1 X1 Y0.5 E1
+; CHANGE_LAYER
+T1
+G0 X0 Y0
+; FEATURE: Outer wall
+G1 X1 Y0 E1
+G0 X0 Y0.5
+; FEATURE: Inner wall
+G1 X1 Y0.5 E1
+"""
+        with tempfile.TemporaryDirectory() as folder:
+            source = Path(folder) / "source.gcode.3mf"
+            with zipfile.ZipFile(source, "w", zipfile.ZIP_DEFLATED) as archive:
+                archive.writestr("Metadata/plate_1.gcode", gcode)
+            replacements = build_interval_detours(
+                source,
+                detour_side="both",
+                subject_filaments={1},
+                same_layer_gap_mm=0,
+            )
+
+        self.assertEqual(set(replacements), {5, 21})
+        self.assertTrue(all(b"tapered detour in" in value for value in replacements.values()))
+
+
+class ProgressMetadataTests(unittest.TestCase):
+    def test_disables_prime_tower_in_project_metadata(self):
+        result = json.loads(_rewrite_project_settings(json.dumps({
+            "enable_prime_tower": "1",
+            "filament_minimal_purge_on_wipe_tower": ["15", "15"],
+            "keep": "yes",
+        }).encode()))
+        self.assertEqual(result["enable_prime_tower"], "0")
+        self.assertEqual(result["filament_minimal_purge_on_wipe_tower"], ["0", "0"])
+        self.assertEqual(result["keep"], "yes")
+
+    def test_collapses_project_filament_arrays_to_one_virtual_filament(self):
+        result = json.loads(_rewrite_project_settings(json.dumps({
+            "filament_colour": ["#111", "#222", "#333"],
+            "filament_type": ["PLA", "PETG", "TPU"],
+            "filament_flow_ratio": [".98", ".99", ".97", ".96", ".95", ".94"],
+            "flush_volumes_matrix": list(range(9)),
+            "different_settings_to_system": ["process", "f1", "f2", "f3", "printer"],
+            "unrelated_pair": ["left", "right"],
+        }).encode()))
+        self.assertEqual(result["filament_colour"], ["#111"])
+        self.assertEqual(result["filament_type"], ["PLA"])
+        self.assertEqual(result["filament_flow_ratio"], [".98", ".99"])
+        self.assertEqual(result["flush_volumes_matrix"], [0])
+        self.assertEqual(result["different_settings_to_system"], ["process", "f1", "printer"])
+        self.assertEqual(result["unrelated_pair"], ["left", "right"])
+
+    def test_collapses_plate_and_sequence_mapping_metadata(self):
+        model = _rewrite_model_settings(b'''<?xml version="1.0"?><config><plate>
+            <metadata key="filament_maps" value="1 1 1"/>
+            <metadata key="filament_volume_maps" value="0 0 0"/>
+        </plate></config>''').decode()
+        self.assertIn('key="filament_maps" value="1"', model)
+        self.assertIn('key="filament_volume_maps" value="0"', model)
+        sequence = json.loads(_rewrite_sequence(json.dumps({"plate_1": {
+            "sequence": [1, 2, 1], "nozzle_sequence": [0, 1, 0],
+            "optimal_assignment": [0, 1, 2],
+        }}).encode()))
+        self.assertEqual(sequence["plate_1"]["sequence"], [1, 1, 1])
+        self.assertEqual(sequence["plate_1"]["nozzle_sequence"], [0, 0, 0])
+        self.assertEqual(sequence["plate_1"]["optimal_assignment"], [0])
+
+    def test_rewrites_progress_from_layers_and_removes_stale_remaining_time(self):
+        source = io.BytesIO(
+            b"; model printing time: 2h; total estimated time: 3h\n"
+            b"; filament_map = 1,1,1\n"
+            b"; filament_nozzle_map = 0,0,0\n"
+            b"; filament_colour = #111111;#222222;#333333\n"
+            b"; filament_type = PLA;PETG;TPU\n"
+            b"M73 P0 R180\nM73 L1\nM73 P40 R120\n"
+            b"M73 L2\nM73 P90 R10\nM73 P100 R0\n"
+        )
+        destination = io.BytesIO()
+        _rewrite_gcode_metadata(source, destination, CollapseReport())
+        result = destination.getvalue()
+        self.assertIn(b"M73 P0 R60\n", result)
+        self.assertIn(b"M73 P50 R1\n", result)
+        self.assertIn(b"M73 P100 R0\n", result)
+        self.assertNotIn(b"R180", result)
+        self.assertNotIn(b"model printing time: 2h", result)
+        self.assertIn(b"; filament_map = 1\n", result)
+        self.assertIn(b"; filament_nozzle_map = 0\n", result)
+        self.assertIn(b"; filament_colour = #111111\n", result)
+        self.assertIn(b"; filament_type = PLA\n", result)
+
+    def test_collapses_initial_ams_selection_to_first_filament(self):
+        source = io.BytesIO(
+            b"M620 M\n"
+            b"M620 S1A   ; switch material if AMS exists\n"
+            b"    T1\n"
+            b"M621 S1A\n"
+            b"M620.1 E F548.788 T240\n"
+            b"T1000\n"
+            b"T255\n"
+        )
+        destination = io.BytesIO()
+        _rewrite_gcode_metadata(source, destination, CollapseReport())
+        result = destination.getvalue()
+        self.assertIn(b"M620 S0A   ; switch material if AMS exists\n", result)
+        self.assertIn(b"    T0\n", result)
+        self.assertIn(b"M621 S0A\n", result)
+        self.assertIn(b"M620.1 E F548.788 T240\n", result)
+        self.assertIn(b"T1000\n", result)
+        self.assertIn(b"T255\n", result)
+        self.assertNotIn(b"M620 S1A", result)
+        self.assertNotIn(b"M621 S1A", result)
+
+    def test_plate_json_uses_zero_based_single_extruder(self):
+        result = json.loads(_rewrite_plate_json(json.dumps({
+            "filament_colors": ["#111", "#222"],
+            "filament_ids": [0, 1],
+            "first_extruder": 1,
+        }).encode()))
+        self.assertEqual(result["filament_colors"], ["#111"])
+        self.assertEqual(result["filament_ids"], [0])
+        self.assertEqual(result["first_extruder"], 0)
+
+
+class FilenameTests(unittest.TestCase):
+    def test_removes_repeated_multiword_plate_name(self):
+        name = "RelicRush_A_V17(Bridge Tower Slice - 0.16)-prepared-fuzzy_Bridge Tower.gcode.3mf"
+        self.assertEqual(
+            clean_sliced_output_base(name),
+            "RelicRush_A_V17(Bridge Tower Slice - 0.16)-prepared-fuzzy",
+        )
+
+    def test_keeps_unique_or_single_word_suffix(self):
+        self.assertEqual(clean_sliced_output_base("Project_Bridge Tower.gcode.3mf"), "Project_Bridge Tower")
+        self.assertEqual(clean_sliced_output_base("Project_part.gcode.3mf"), "Project_part")
+
+    def test_prepared_name_does_not_repeat_suffix(self):
+        self.assertEqual(suggest_prepared_project_name("Tower.3mf"), "Tower (C2F-Prepped).3mf")
+        self.assertEqual(suggest_prepared_project_name("Tower-prepared.3mf"), "Tower (C2F-Prepped).3mf")
+        self.assertEqual(suggest_prepared_project_name("Tower (C2F-Prepped).3mf"), "Tower (C2F-Prepped v2).3mf")
+
+    def test_three_stage_names(self):
+        self.assertEqual(
+            suggest_created_package_name("Tower (C2F-Prepped).3mf"),
+            "Tower (C2F-Created).gcode.3mf",
+        )
+        self.assertEqual(
+            suggest_print_package_name("Tower (C2F-Created)_Bridge Tower.gcode.3mf"),
+            "Tower (C2F-Print).gcode.3mf",
+        )
+        self.assertEqual(
+            suggest_print_package_name("Tower-prepared_Bridge Tower.gcode.3mf"),
+            "Tower (C2F-Print).gcode.3mf",
+        )
+
+
+if __name__ == "__main__":
+    unittest.main()
