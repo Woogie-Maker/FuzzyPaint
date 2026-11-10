@@ -4,15 +4,17 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import queue
 import re
 import tempfile
 import threading
 import time
+import webbrowser
 import zipfile
 from pathlib import Path
 import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, messagebox, simpledialog, ttk
 
 from fuzzypaint import (
     ConversionError,
@@ -32,11 +34,46 @@ from bambu_cli import archive_has_gcode, slice_project
 APP_VERSION = "0.2.6"
 
 OUTPUT_SUBFOLDER_NAME = "FuzzyPaint Output"
+GITHUB_URL = "https://github.com/Woogie-Maker/FuzzyPaint"
+
+CONFIG_DIR = Path(os.environ.get("APPDATA", str(Path.home()))) / "FuzzyPaint"
+SETTINGS_FILE = CONFIG_DIR / "settings.json"
+PRESETS_FILE = CONFIG_DIR / "presets.json"
 
 
 def suggested_output_path(source: Path, filename: str) -> Path:
     """Place a suggested output file in a FuzzyPaint Output subfolder next to the source."""
     return source.parent / OUTPUT_SUBFOLDER_NAME / filename
+
+
+def _load_json_dict(path: Path) -> dict:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, OSError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _save_json_dict(path: Path, data: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+def _insert_formatted(text_widget: tk.Text, source: str) -> None:
+    """Render a small Markdown-like subset (#, ##, blank-line paragraphs) into a Text widget."""
+    text_widget.tag_configure("h1", font=("Segoe UI", 13, "bold"), spacing1=12, spacing3=6)
+    text_widget.tag_configure("h2", font=("Segoe UI", 10, "bold"), spacing1=10, spacing3=4)
+    text_widget.tag_configure("body", font=("Segoe UI", 10), spacing3=10)
+    for block in source.strip("\n").split("\n\n"):
+        block = block.strip("\n")
+        if not block:
+            continue
+        if block.startswith("## "):
+            text_widget.insert("end", block[3:].strip() + "\n", "h2")
+        elif block.startswith("# "):
+            text_widget.insert("end", block[2:].strip() + "\n", "h1")
+        else:
+            text_widget.insert("end", block + "\n\n", "body")
 
 
 PRESETS = {
@@ -116,6 +153,25 @@ class App(tk.Tk):
             text="for Bambu Studio — Turn painted colours into surface texture and single-filament detail.",
         ).pack(anchor="w", pady=(2, 10))
 
+        toolbar = ttk.Frame(outer)
+        toolbar.pack(fill="x", pady=(0, 10))
+        ttk.Label(toolbar, text="Preset:").pack(side="left")
+        self.preset_choice = tk.StringVar()
+        self.preset_combo = ttk.Combobox(
+            toolbar, textvariable=self.preset_choice, state="readonly", width=24
+        )
+        self.preset_combo.pack(side="left", padx=(6, 6))
+        self.preset_combo.bind("<<ComboboxSelected>>", self.apply_selected_preset)
+        ttk.Button(toolbar, text="Save Preset…", command=self.save_preset).pack(side="left", padx=(0, 4))
+        ttk.Button(toolbar, text="Delete Preset", command=self.delete_selected_preset).pack(
+            side="left", padx=(0, 12)
+        )
+        ttk.Separator(toolbar, orient="vertical").pack(side="left", fill="y", padx=6)
+        ttk.Button(toolbar, text="Save Settings", command=self.save_settings).pack(side="left", padx=(6, 4))
+        ttk.Button(toolbar, text="Reset to Defaults", command=self.reset_to_defaults).pack(side="left")
+        ttk.Separator(toolbar, orient="vertical").pack(side="left", fill="y", padx=6)
+        ttk.Button(toolbar, text="View on GitHub", command=self.open_github).pack(side="left")
+
         self.notebook = ttk.Notebook(outer)
         self.notebook.pack(fill="both", expand=True)
         self.prepare_tab = ttk.Frame(self.notebook, padding=16)
@@ -124,6 +180,10 @@ class App(tk.Tk):
         self.notebook.add(self.gcode_tab, text="2  Create single-filament file")
         self._build_prepare_tab()
         self._build_gcode_tab()
+
+        self._default_settings = self._collect_settings()
+        self._load_settings_file()
+        self._refresh_preset_list()
 
         footer = ttk.Frame(outer)
         footer.pack(fill="x", pady=(10, 0))
@@ -437,6 +497,117 @@ class App(tk.Tk):
         else:
             self.gcode_advanced_frame.grid_remove()
 
+    # --- Settings and presets -------------------------------------------------
+    # Remembered/saved here: workflow preferences shared across jobs (fuzzy
+    # tuning, outline tuning, the disable-wipe/retraction/Z-hop choices). File
+    # paths for the current job are deliberately excluded -- those aren't
+    # "settings" in the sense a preset or a saved default should capture.
+
+    def _settings_fields(self) -> dict[str, tk.Variable]:
+        return {
+            "project_slots": self.project_slots,
+            "protect_planar": self.protect_planar,
+            "disable_wipe": self.disable_wipe,
+            "disable_retractions": self.disable_retractions,
+            "force_sloped_z_hop": self.force_sloped_z_hop,
+            "strip_prepare_attachments": self.strip_prepare_attachments,
+            "prepare_advanced": self.prepare_advanced,
+            "planar_angle": self.planar_angle,
+            "planar_area": self.planar_area,
+            "override_fuzzy": self.override_fuzzy,
+            "fuzzy_thickness": self.fuzzy_thickness,
+            "fuzzy_distance": self.fuzzy_distance,
+            "fuzzy_first_layer": self.fuzzy_first_layer,
+            "fuzzy_mode": self.fuzzy_mode,
+            "fuzzy_noise": self.fuzzy_noise,
+            "fuzzy_octaves": self.fuzzy_octaves,
+            "fuzzy_persistence": self.fuzzy_persistence,
+            "fuzzy_scale": self.fuzzy_scale,
+            "gcode_slots": self.gcode_slots,
+            "gcode_preset": self.gcode_preset,
+            "gcode_advanced": self.gcode_advanced,
+            "detour_side": self.detour_side,
+            "strip_attachments": self.strip_attachments,
+            "detour_depth": self.detour_depth,
+            "boundary_resolution": self.boundary_resolution,
+            "transition_distance": self.transition_distance,
+            "endpoint_coverage": self.endpoint_coverage,
+            "minimum_span": self.minimum_span,
+            "inner_search": self.inner_search,
+            "same_layer_gap": self.same_layer_gap,
+        }
+
+    def _collect_settings(self) -> dict[str, object]:
+        return {name: var.get() for name, var in self._settings_fields().items()}
+
+    def _apply_settings(self, data: dict[str, object]) -> None:
+        fields = self._settings_fields()
+        for name, value in data.items():
+            variable = fields.get(name)
+            if variable is None:
+                continue
+            try:
+                variable.set(value)
+            except tk.TclError:
+                pass
+        self._toggle_prepare_advanced()
+        self._toggle_gcode_advanced()
+        self._toggle_fuzzy_settings()
+
+    def _load_settings_file(self) -> None:
+        data = _load_json_dict(SETTINGS_FILE)
+        if data:
+            self._apply_settings(data)
+
+    def save_settings(self) -> None:
+        _save_json_dict(SETTINGS_FILE, self._collect_settings())
+        messagebox.showinfo(
+            "Settings saved", "FuzzyPaint will open with these settings next time it starts."
+        )
+
+    def reset_to_defaults(self) -> None:
+        self._apply_settings(self._default_settings)
+        self.preset_choice.set("")
+        messagebox.showinfo(
+            "Defaults restored", "All settings have been reset to FuzzyPaint's built-in defaults."
+        )
+
+    def _refresh_preset_list(self) -> None:
+        self.preset_combo["values"] = sorted(_load_json_dict(PRESETS_FILE))
+
+    def save_preset(self) -> None:
+        name = simpledialog.askstring("Save preset", "Name this preset:", parent=self)
+        if not name:
+            return
+        name = name.strip()
+        if not name:
+            return
+        presets = _load_json_dict(PRESETS_FILE)
+        presets[name] = self._collect_settings()
+        _save_json_dict(PRESETS_FILE, presets)
+        self._refresh_preset_list()
+        self.preset_choice.set(name)
+
+    def apply_selected_preset(self, _event=None) -> None:
+        name = self.preset_choice.get()
+        data = _load_json_dict(PRESETS_FILE).get(name)
+        if data:
+            self._apply_settings(data)
+
+    def delete_selected_preset(self) -> None:
+        name = self.preset_choice.get()
+        if not name:
+            return
+        presets = _load_json_dict(PRESETS_FILE)
+        if name in presets and messagebox.askyesno("Delete preset", f'Delete the preset "{name}"?'):
+            del presets[name]
+            _save_json_dict(PRESETS_FILE, presets)
+            self.preset_choice.set("")
+            self._refresh_preset_list()
+
+    def open_github(self) -> None:
+        webbrowser.open(GITHUB_URL)
+
     def show_help(self) -> None:
         window = tk.Toplevel(self)
         window.title(f"About FuzzyPaint {APP_VERSION}")
@@ -448,8 +619,8 @@ class App(tk.Tk):
         ttk.Label(body, text="FuzzyPaint", font=("Segoe UI", 15, "bold")).pack(anchor="w")
         ttk.Label(body, text="for Bambu Studio", foreground="#555555").pack(anchor="w")
         ttk.Label(body, text=f"Version {APP_VERSION}", foreground="#555555").pack(anchor="w", pady=(1, 12))
-        ttk.Label(body, text="Why FuzzyPaint exists", font=("Segoe UI", 15, "bold")).pack(anchor="w")
         help_text = (
+            "# Why FuzzyPaint exists\n\n"
             "FuzzyPaint was created to add fuzzy skin only to the colour-painted areas of a model, "
             "allowing those details to stand out even when the model is printed with a single colour.\n\n"
             "If fuzzy skin is not wanted, FuzzyPaint can instead create a physical outline around the "
@@ -458,31 +629,37 @@ class App(tk.Tk):
             "On complex models with detailed paintwork, replacing hundreds of filament changes with a "
             "single-filament print can save hundreds of hours of printing time and a substantial amount "
             "of purge waste.\n\n"
-            "HOW THE TWO STEPS WORK\n\n"
-            "1. Prepare project\n"
+            "# How the two steps work\n\n"
+            "## 1. Prepare project\n\n"
             "Choose a colour-painted Bambu Studio 3MF project. FuzzyPaint keeps the colour painting "
             "needed by step 2, adds fuzzy texture to the selected painted colour, and creates a separate "
             "project ready for multicolour slicing.\n\n"
-            "2. Create a single-filament file\n"
+            "## 2. Create a single-filament file\n\n"
             "Choose the prepared project and FuzzyPaint will run Bambu Studio's slicer automatically. "
             "Alternatively, choose a plate sliced file exported manually. FuzzyPaint uses the colour "
             "boundaries to add physical outline detail, then removes filament changes and "
             "the purge tower. The finished file prints from one spool. You can use this step without fuzzy skin.\n\n"
-            "Wipe while retracting\n"
+            "## Wipe while retracting\n\n"
             "The prepared project disables ordinary wipe-while-retracting moves by default. Bambu Studio "
             "then plans its retractions with wiping disabled before the sliced file is created. Untick the "
-            "option on step 1 if a material or model prints better with wiping enabled.\n\n"
-            "Retractions\n"
+            "option on either step if a material or model prints better with wiping enabled.\n\n"
+            "## Retractions\n\n"
             "Ordinary model retractions are disabled for every virtual filament by default. This is separate "
-            "from wipe while retracting. Untick the option on step 1 if the model or material needs retraction "
-            "to control stringing. Tool-change retractions are removed with their complete colour-change blocks.\n\n"
-            "Sloped Z-hop\n"
+            "from wipe while retracting. Untick the option on either step if the model or material needs "
+            "retraction to control stringing. Tool-change retractions are removed with their complete "
+            "colour-change blocks.\n\n"
+            "## Sloped Z-hop\n\n"
             "Sloped Z-hop is selected by default for the process and every filament. Existing Z-hop heights "
             "are retained; the option changes only the lift type.\n\n"
-            "Which colour number?\n"
+            "## Which colour number?\n\n"
             "Use the filament slot number shown beside the painted colour in Bambu Studio. Multiple slots "
             "can be entered as 2,4.\n\n"
-            "Technical detail\n"
+            "## Settings, presets and the toolbar\n\n"
+            "Save Settings remembers your current choices as the ones FuzzyPaint opens with next time. "
+            "Reset to Defaults restores FuzzyPaint's original built-in values without touching any saved "
+            "preset. Presets are named snapshots of the same settings, switchable from the toolbar, useful "
+            "when different models need different fuzzy or outline tuning.\n\n"
+            "## Technical detail\n\n"
             "Bambu stores colour and fuzzy painting as per-triangle masks inside the 3MF. The first step "
             "copies selected colour-mask regions into the fuzzy-skin mask. The second step analyses outer-wall "
             "toolpaths in exported G-code, inserts inward detours at colour boundaries, and collapses the job "
@@ -501,7 +678,7 @@ class App(tk.Tk):
             yscrollcommand=scrollbar.set,
         )
         scrollbar.configure(command=text.yview)
-        text.insert("1.0", help_text)
+        _insert_formatted(text, help_text)
         text.configure(state="disabled")
         text.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
