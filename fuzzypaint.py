@@ -898,6 +898,32 @@ def clean_sliced_output_base(filename: str) -> str:
 # "FP-" is ever generated going forward.
 _STAGE_SUFFIX_RE = r"(?:C2F|FP)-(?:Prepped|Created|Print(?:_Ready)?)"
 
+_TRAILING_VERSION_RE = re.compile(r"\s+v(\d+)$")
+
+
+def next_available_destination(path: Path) -> Path:
+    """If `path` already exists, return the next free "... vN" variant instead.
+
+    Numbering starts at v2 -- the plain, unversioned name is implicitly "v1" --
+    and uses plain integers (v2, v3, v4, ...), not a dotted v1.1/v1.2 scheme.
+    A name that already ends in " vN" has that stripped first, so repeatedly
+    hitting a collision advances the number instead of stacking suffixes.
+    """
+    if not path.exists():
+        return path
+    name = path.name
+    if name.lower().endswith(".gcode.3mf"):
+        stem, ext = name[:-10], name[-10:]
+    else:
+        stem, ext = path.stem, path.suffix
+    stem = _TRAILING_VERSION_RE.sub("", stem)
+    counter = 2
+    while True:
+        candidate = path.with_name(f"{stem} v{counter}{ext}")
+        if not candidate.exists():
+            return candidate
+        counter += 1
+
 
 def suggest_prepared_project_name(filename: str) -> str:
     """Suggest the canonical stage-one project filename."""

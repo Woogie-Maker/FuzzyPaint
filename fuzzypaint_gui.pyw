@@ -25,6 +25,7 @@ from fuzzypaint import (
     configure_project_for_slicing,
     convert_3mf,
     format_report,
+    next_available_destination,
     parse_slots,
     suggest_prepared_project_name,
     suggest_print_package_name,
@@ -34,7 +35,7 @@ from gcode_single_filament import collapse_gcode_3mf
 from bambu_cli import archive_has_gcode, slice_project
 
 
-APP_VERSION = "0.5.0"
+APP_VERSION = "0.6.0"
 
 OUTPUT_SUBFOLDER_NAME = "FuzzyPaint Output"
 GITHUB_URL = "https://github.com/Woogie-Maker/FuzzyPaint"
@@ -324,21 +325,22 @@ class App(tk.Tk):
         ).pack(side="left")
 
     @staticmethod
-    def _confirm_overwrite(destination: Path) -> bool:
-        """Ask before silently overwriting an existing output file.
+    def _avoid_overwrite(destination: Path, destination_variable: tk.StringVar) -> Path:
+        """Auto-resolve a destination that already exists to the next "... vN" name.
 
-        The suggested destination filename is the same every time a given
-        source is reprocessed (it doesn't auto-number like the prepared-
-        project suggestion does), so re-running on the same input -- for
+        Re-running on the same input with the same destination -- for
         example, to try a different setting -- would otherwise silently
-        replace the previous output with no warning at all.
+        replace the previous output, since the suggested filename is the
+        same every time (it doesn't auto-number like the prepared-project
+        suggestion does). Resolving automatically, rather than popping an
+        "overwrite?" dialog on every rerun, keeps every previous attempt on
+        disk; the destination field is updated so the actual output name
+        that will be written stays visible before the job even starts.
         """
-        if not destination.exists():
-            return True
-        return messagebox.askyesno(
-            "File already exists",
-            f"{destination.name} already exists in\n{destination.parent}\n\nOverwrite it?",
-        )
+        resolved = next_available_destination(destination)
+        if resolved != destination:
+            destination_variable.set(str(resolved))
+        return resolved
 
     @staticmethod
     def _file_row(parent, row, label, variable, command) -> None:
@@ -357,7 +359,14 @@ class App(tk.Tk):
             parent, text=f"{units}  {hint}".rstrip(), foreground="#555555", width=22
         ).grid(row=row, column=2, sticky="w", pady=5)
 
-    def _scrollable_content(self, host) -> ttk.Frame:
+    def _scrollable_content(self, host, tab) -> ttk.Frame:
+        """Build a scrollable area inside `host`, which is scrolled only
+        while `tab` (the actual notebook tab page) is the selected one.
+
+        `host` is a plain sub-frame of `tab`, not the whole tab page -- that
+        split is what lets a fixed action-button area dock below the scroll
+        area instead of scrolling away with everything else.
+        """
         canvas = tk.Canvas(host, highlightthickness=0, borderwidth=0)
         scrollbar = ttk.Scrollbar(host, orient="vertical", command=canvas.yview)
         canvas.configure(yscrollcommand=scrollbar.set)
@@ -381,7 +390,7 @@ class App(tk.Tk):
                     return None
             except tk.TclError:
                 return None
-            if self.notebook.select() == str(host):
+            if self.notebook.select() == str(tab):
                 canvas.yview_scroll(-1 if event.delta > 0 else 1, "units")
                 return "break"
             return None
@@ -446,7 +455,13 @@ class App(tk.Tk):
         return label
 
     def _build_prepare_tab(self) -> None:
-        tab = self._scrollable_content(self.prepare_tab)
+        action_host = ttk.Frame(self.prepare_tab, padding=(16, 8, 16, 14))
+        action_host.pack(side="bottom", fill="x")
+        ttk.Separator(self.prepare_tab, orient="horizontal").pack(side="bottom", fill="x")
+        scroll_host = ttk.Frame(self.prepare_tab)
+        scroll_host.pack(side="top", fill="both", expand=True)
+
+        tab = self._scrollable_content(scroll_host, self.prepare_tab)
         tab.columnconfigure(0, weight=1)
         intro = ttk.Frame(tab)
         intro.grid(row=0, column=0, sticky="w", pady=(0, 10))
@@ -568,17 +583,23 @@ class App(tk.Tk):
         self._toggle_fuzzy_settings()
         self._toggle_prepare_advanced()
 
-        bottom = ttk.Frame(tab)
-        bottom.grid(row=4, column=0, sticky="nsew", pady=(14, 0))
-        bottom.columnconfigure(0, weight=1)
-        SelectableLabel(bottom, textvariable=self.prepare_status, width=92).grid(
+        action_host.columnconfigure(0, weight=1)
+        SelectableLabel(action_host, textvariable=self.prepare_status, width=92).grid(
             row=0, column=0, columnspan=2, sticky="ew"
         )
-        self.prepare_button = ttk.Button(bottom, text="Prepare file for slicing", command=self.prepare_project)
+        self.prepare_button = ttk.Button(
+            action_host, text="Prepare file for slicing", command=self.prepare_project
+        )
         self.prepare_button.grid(row=1, column=1, sticky="e", pady=(8, 0))
 
     def _build_gcode_tab(self) -> None:
-        tab = self._scrollable_content(self.gcode_tab)
+        action_host = ttk.Frame(self.gcode_tab, padding=(16, 8, 16, 14))
+        action_host.pack(side="bottom", fill="x")
+        ttk.Separator(self.gcode_tab, orient="horizontal").pack(side="bottom", fill="x")
+        scroll_host = ttk.Frame(self.gcode_tab)
+        scroll_host.pack(side="top", fill="both", expand=True)
+
+        tab = self._scrollable_content(scroll_host, self.gcode_tab)
         tab.columnconfigure(0, weight=1)
         SelectableLabel(
             tab,
@@ -682,18 +703,18 @@ class App(tk.Tk):
         self.gcode_advanced_frame.columnconfigure(1, weight=1)
         self._toggle_gcode_advanced()
 
-        bottom = ttk.Frame(tab)
-        bottom.grid(row=5, column=0, sticky="nsew", pady=(14, 0))
-        bottom.columnconfigure(0, weight=1)
+        action_host.columnconfigure(0, weight=1)
         SelectableLabel(
-            bottom,
+            action_host,
             text=(
                 "After creation: open the finished .gcode.3mf in Bambu Studio and inspect the complete "
                 "Preview before sending it to the printer."
             ),
             width=95,
         ).grid(row=0, column=0, columnspan=2, sticky="w")
-        self.gcode_button = ttk.Button(bottom, text="Create single-filament print file", command=self.process_gcode)
+        self.gcode_button = ttk.Button(
+            action_host, text="Create single-filament print file", command=self.process_gcode
+        )
         self.gcode_button.grid(row=1, column=1, sticky="e", pady=(10, 0))
 
     def _toggle_prepare_advanced(self) -> None:
@@ -1012,9 +1033,7 @@ class App(tk.Tk):
         except (ConversionError, ValueError) as exc:
             messagebox.showerror("Invalid setting", str(exc))
             return
-        destination = Path(self.project_destination.get())
-        if not self._confirm_overwrite(destination):
-            return
+        destination = self._avoid_overwrite(Path(self.project_destination.get()), self.project_destination)
         source = self.project_source.get()
         protect_planar = self.protect_planar.get()
         disable_wipe = self.disable_wipe.get()
@@ -1100,9 +1119,7 @@ class App(tk.Tk):
             self.detour_side.get()
         ]
         source = Path(self.gcode_source.get())
-        destination = Path(self.gcode_destination.get())
-        if not self._confirm_overwrite(destination):
-            return
+        destination = self._avoid_overwrite(Path(self.gcode_destination.get()), self.gcode_destination)
         strip_attachments = self.strip_attachments.get()
         disable_retractions = self.disable_retractions.get()
         disable_wipe_while_retracting = self.disable_wipe.get()

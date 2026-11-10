@@ -10,6 +10,22 @@ The version bump happens in the same commit as the change it describes, not as a
 separate afterthought -- that's what let `APP_VERSION` drift and sit at 0.2.6
 through several real changes before this file existed.
 
+## 0.6.0
+
+- Fixed: expanding "Show advanced settings"/"Show advanced outline settings"
+  pushed the primary action button ("Prepare file for slicing" /
+  "Create single-filament print file") out of view, since it lived inside
+  the same scrollable region as everything else. Each tab's action area
+  (status line + button) now docks to a fixed strip at the bottom of the
+  window, below a separator, outside the scrollable area entirely -- it no
+  longer moves regardless of what's expanded or how far the content above
+  is scrolled.
+- Replaced the 0.5.0 "overwrite this file?" confirmation with automatic
+  "... vN" versioning: if the chosen destination already exists, FuzzyPaint
+  now resolves to the next free v2/v3/v4/... name itself (never v1 -- the
+  plain name is implicitly that) and updates the destination field to show
+  the actual name before the job starts, rather than asking every time.
+
 ## 0.5.0
 
 - Fixed a real gap: re-running the single-filament step (or the prepare

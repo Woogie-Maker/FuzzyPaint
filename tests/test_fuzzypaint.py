@@ -17,6 +17,7 @@ from fuzzypaint import (
     decode_paint_stream,
     encode_paint_stream,
     leaf_states,
+    next_available_destination,
     suggest_created_package_name,
     suggest_prepared_project_name,
     suggest_print_package_name,
@@ -936,6 +937,40 @@ class FilenameTests(unittest.TestCase):
     def test_keeps_unique_or_single_word_suffix(self):
         self.assertEqual(clean_sliced_output_base("Project_Bridge Tower.gcode.3mf"), "Project_Bridge Tower")
         self.assertEqual(clean_sliced_output_base("Project_part.gcode.3mf"), "Project_part")
+
+    def test_next_available_destination_returns_path_unchanged_when_free(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "Tower (FP-Print_Ready).gcode.3mf"
+            self.assertEqual(next_available_destination(path), path)
+
+    def test_next_available_destination_numbers_plainly_from_v2(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "Tower (FP-Print_Ready).gcode.3mf"
+            path.write_text("first run")
+            self.assertEqual(
+                next_available_destination(path).name,
+                "Tower (FP-Print_Ready) v2.gcode.3mf",
+            )
+            (Path(folder) / "Tower (FP-Print_Ready) v2.gcode.3mf").write_text("second run")
+            self.assertEqual(
+                next_available_destination(path).name,
+                "Tower (FP-Print_Ready) v3.gcode.3mf",
+            )
+
+    def test_next_available_destination_does_not_stack_version_suffixes(self):
+        with tempfile.TemporaryDirectory() as folder:
+            existing = Path(folder) / "Tower (FP-Print_Ready) v2.gcode.3mf"
+            existing.write_text("already v2")
+            self.assertEqual(
+                next_available_destination(existing).name,
+                "Tower (FP-Print_Ready) v3.gcode.3mf",
+            )
+
+    def test_next_available_destination_handles_plain_3mf_extension(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "Tower (FP-Prepped).3mf"
+            path.write_text("first run")
+            self.assertEqual(next_available_destination(path).name, "Tower (FP-Prepped) v2.3mf")
 
     def test_prepared_name_does_not_repeat_suffix(self):
         self.assertEqual(suggest_prepared_project_name("Tower.3mf"), "Tower (FP-Prepped).3mf")
