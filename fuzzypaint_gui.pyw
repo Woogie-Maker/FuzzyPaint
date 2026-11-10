@@ -84,49 +84,128 @@ PRESETS = {
 }
 
 
+class SelectableLabel(tk.Text):
+    """A read-only, mouse-selectable/copyable Text widget that looks and wraps like a Label.
+
+    Disabling a Text widget blocks typing but not mouse selection or <<Copy>>,
+    so this gives Label-like static or textvariable-bound text that the user
+    can drag-select and Ctrl+C -- plain ttk.Label never allows that.
+    """
+
+    def __init__(
+        self,
+        parent,
+        *,
+        text: str = "",
+        textvariable: tk.StringVar | None = None,
+        font=None,
+        foreground: str | None = None,
+        justify: str = "left",
+        **kwargs,
+    ) -> None:
+        background = ttk.Style().lookup("TLabel", "background") or "SystemButtonFace"
+        super().__init__(
+            parent,
+            wrap="word",
+            relief="flat",
+            borderwidth=0,
+            highlightthickness=0,
+            background=background,
+            padx=0,
+            pady=0,
+            height=1,
+            cursor="xterm",
+            takefocus=False,
+            **kwargs,
+        )
+        if font is not None:
+            self.configure(font=font)
+        self.tag_configure("body", justify=justify, foreground=foreground or "")
+        self.bind("<Key>", lambda _event: "break")
+        self.bind("<Configure>", self._resize, add="+")
+        self._textvariable = textvariable
+        if textvariable is not None:
+            textvariable.trace_add("write", self._on_variable_changed)
+            self._set_text(textvariable.get())
+        else:
+            self._set_text(text)
+
+    def _on_variable_changed(self, *_args) -> None:
+        self._set_text(self._textvariable.get())
+
+    def _set_text(self, value: str) -> None:
+        self.configure(state="normal")
+        self.delete("1.0", "end")
+        self.insert("1.0", value, "body")
+        self.configure(state="disabled")
+        self._resize()
+
+    def _resize(self, _event=None) -> None:
+        self.update_idletasks()
+        lines = self.count("1.0", "end", "displaylines")
+        height = max(1, lines[0] if lines else 1)
+        if int(self.cget("height")) != height:
+            self.configure(height=height)
+
+
 class ToolTip:
-    """Small delayed hover help without adding permanent visual clutter."""
+    """Delayed hover help that stays open -- and selectable -- while the
+
+    pointer is over either the source widget or the popup itself. Hiding is
+    deferred by a short grace period so moving the mouse from the source
+    widget into the popup (to select/copy its text) doesn't close it first.
+    """
 
     def __init__(self, widget, text: str) -> None:
         self.widget = widget
         self.text = text
-        self.after_id = None
+        self.show_after_id = None
+        self.hide_after_id = None
         self.window = None
-        widget.bind("<Enter>", self._schedule, add="+")
-        widget.bind("<Leave>", self._hide, add="+")
-        widget.bind("<ButtonPress>", self._hide, add="+")
+        widget.bind("<Enter>", self._schedule_show, add="+")
+        widget.bind("<Leave>", self._schedule_hide, add="+")
+        widget.bind("<ButtonPress>", self._hide_now, add="+")
         widget._fuzzypaint_tooltip = self
 
-    def _schedule(self, _event=None) -> None:
-        self._cancel()
-        self.after_id = self.widget.after(450, self._show)
+    def _schedule_show(self, _event=None) -> None:
+        self._cancel_hide()
+        self._cancel_show()
+        self.show_after_id = self.widget.after(450, self._show)
 
-    def _cancel(self) -> None:
-        if self.after_id is not None:
-            self.widget.after_cancel(self.after_id)
-            self.after_id = None
+    def _cancel_show(self) -> None:
+        if self.show_after_id is not None:
+            self.widget.after_cancel(self.show_after_id)
+            self.show_after_id = None
+
+    def _schedule_hide(self, _event=None) -> None:
+        self._cancel_show()
+        self._cancel_hide()
+        self.hide_after_id = self.widget.after(200, self._hide_now)
+
+    def _cancel_hide(self) -> None:
+        if self.hide_after_id is not None:
+            self.widget.after_cancel(self.hide_after_id)
+            self.hide_after_id = None
 
     def _show(self) -> None:
-        self.after_id = None
+        self.show_after_id = None
         if self.window is not None:
             return
+        background = ttk.Style().lookup("TLabel", "background") or "SystemButtonFace"
         self.window = tk.Toplevel(self.widget)
         self.window.wm_overrideredirect(True)
         self.window.wm_geometry(
             f"+{self.widget.winfo_rootx() + 18}+{self.widget.winfo_rooty() + 22}"
         )
-        ttk.Label(
-            self.window,
-            text=self.text,
-            justify="left",
-            wraplength=360,
-            padding=(9, 6),
-            relief="solid",
-            borderwidth=1,
-        ).pack()
+        border = tk.Frame(self.window, background=background, relief="solid", borderwidth=1)
+        border.pack()
+        SelectableLabel(border, text=self.text, width=46).pack(padx=9, pady=6)
+        self.window.bind("<Enter>", lambda _event: self._cancel_hide(), add="+")
+        self.window.bind("<Leave>", self._schedule_hide, add="+")
 
-    def _hide(self, _event=None) -> None:
-        self._cancel()
+    def _hide_now(self, _event=None) -> None:
+        self._cancel_show()
+        self._cancel_hide()
         if self.window is not None:
             self.window.destroy()
             self.window = None
@@ -189,10 +268,11 @@ class App(tk.Tk):
         footer.pack(fill="x", pady=(10, 0))
         self.progress = ttk.Progressbar(footer, mode="indeterminate", length=170)
         self.progress.pack(side="right")
-        ttk.Label(
+        SelectableLabel(
             footer,
             text="Source files are never overwritten. Inspect the complete Bambu Studio Preview before printing.",
             foreground="#555555",
+            width=90,
         ).pack(side="left")
 
     @staticmethod
@@ -354,7 +434,7 @@ class App(tk.Tk):
         bottom = ttk.Frame(tab)
         bottom.grid(row=4, column=0, sticky="nsew", pady=(14, 0))
         bottom.columnconfigure(0, weight=1)
-        ttk.Label(bottom, textvariable=self.prepare_status, wraplength=740).grid(
+        SelectableLabel(bottom, textvariable=self.prepare_status, width=92).grid(
             row=0, column=0, columnspan=2, sticky="ew"
         )
         self.prepare_button = ttk.Button(bottom, text="Prepare file for slicing", command=self.prepare_project)
@@ -363,14 +443,14 @@ class App(tk.Tk):
     def _build_gcode_tab(self) -> None:
         tab = self._scrollable_content(self.gcode_tab)
         tab.columnconfigure(0, weight=1)
-        ttk.Label(
+        SelectableLabel(
             tab,
             text=(
                 "Choose the prepared FuzzyPaint project. The tool will use Bambu Studio's slicer automatically, "
                 "then keep the painted outlines while changing the result to one spool—without colour changes "
                 "or a purge tower. You can also choose a plate sliced file you exported manually."
             ),
-            wraplength=790,
+            width=95,
         ).grid(row=0, column=0, sticky="w", pady=(0, 10))
 
         self.gcode_source = tk.StringVar()
@@ -391,7 +471,7 @@ class App(tk.Tk):
         self.strip_attachments = tk.BooleanVar(value=True)
         self._apply_preset()
 
-        ttk.Label(tab, textvariable=self.gcode_status, wraplength=790).grid(
+        SelectableLabel(tab, textvariable=self.gcode_status, width=95).grid(
             row=1, column=0, sticky="ew", pady=(0, 10)
         )
 
