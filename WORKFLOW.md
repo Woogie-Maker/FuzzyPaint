@@ -52,9 +52,11 @@ Studio slicer using the printer, filament and process profiles already stored
 inside that project, then immediately performs the single-filament conversion.
 The regular Bambu Studio window may remain open while this runs.
 
-**Disable retractions before automatic slicing** is enabled by default. It is
-applied to a temporary slicing copy, so it also works with an older prepared
-project without rerunning step 1.
+Retractions, wipe-while-retracting and Z-hop type are always forced to this
+workflow's required values before automatic slicing — this is not a toggle,
+because the single-filament collapse step assumes they are off. It is applied
+to a temporary slicing copy, so it also works with an older prepared project
+without rerunning step 1.
 
 ## Manual slicing and export (fallback)
 

@@ -659,6 +659,8 @@ def configure_project_for_slicing(
     destination: Path | str,
     *,
     disable_retractions: bool = False,
+    disable_wipe_while_retracting: bool = False,
+    force_sloped_z_hop: bool = False,
 ) -> None:
     """Copy an editable 3MF while enforcing last-minute slicing settings.
 
@@ -697,6 +699,8 @@ def configure_project_for_slicing(
                     payload = source_zip.read(info)
                     if info.filename == settings_name:
                         payload = _configure_retractions(payload, disable_retractions)
+                        payload = _configure_wipe_while_retracting(payload, disable_wipe_while_retracting)
+                        payload = _configure_sloped_z_hop(payload, force_sloped_z_hop)
                     output_zip.writestr(info, payload)
         os.replace(temp_name, destination_path)
         temp_name = None

@@ -391,6 +391,45 @@ G1 X101 Y131
             self.assertEqual(result["filament_retraction_length"], ["0", "0", "0", "0"])
             self.assertEqual(result["use_firmware_retraction"], "0")
 
+    def test_slicing_copy_can_also_force_wipe_and_z_hop_together(self):
+        with tempfile.TemporaryDirectory() as folder:
+            source = Path(folder) / "prepared.3mf"
+            output = Path(folder) / "slice-input.3mf"
+            model = b'<model><triangle v1="0" v2="1" v3="2" paint_fuzzy_skin="4"/></model>'
+            settings = {
+                "filament_settings_id": ["PLA", "PETG"],
+                "different_settings_to_system": ["", "", "", ""],
+                "retraction_length": ["0.8", "0.6"],
+                "filament_retraction_length": ["nil", "0.4", "0.7", "nil"],
+                "use_firmware_retraction": "1",
+                "wipe": ["1", "1"],
+                "filament_wipe": ["nil", "1", "1", "nil"],
+                "z_hop_types": ["Auto Lift", "Normal Lift"],
+                "filament_z_hop_types": ["nil", "Auto Lift", "Normal Lift", "nil"],
+                "z_hop": ["0.4", "0.6"],
+            }
+            with zipfile.ZipFile(source, "w", zipfile.ZIP_DEFLATED) as archive:
+                archive.writestr("3D/Objects/object_1.model", model)
+                archive.writestr("Metadata/project_settings.config", json.dumps(settings))
+            configure_project_for_slicing(
+                source,
+                output,
+                disable_retractions=True,
+                disable_wipe_while_retracting=True,
+                force_sloped_z_hop=True,
+            )
+            with zipfile.ZipFile(output) as archive:
+                result = json.loads(archive.read("Metadata/project_settings.config"))
+            self.assertEqual(result["retraction_length"], ["0", "0"])
+            self.assertEqual(result["wipe"], ["0", "0"])
+            self.assertEqual(result["filament_wipe"], ["0", "0", "0", "0"])
+            self.assertEqual(result["z_hop_types"], ["Slope Lift", "Slope Lift"])
+            self.assertEqual(
+                result["filament_z_hop_types"], ["Slope Lift", "Slope Lift", "Slope Lift", "Slope Lift"]
+            )
+            # Z-hop heights themselves are left untouched by the sloped-lift switch.
+            self.assertEqual(result["z_hop"], ["0.4", "0.6"])
+
     def test_forces_sloped_z_hop_without_changing_heights_or_retraction(self):
         with tempfile.TemporaryDirectory() as folder:
             source = Path(folder) / "source.3mf"
