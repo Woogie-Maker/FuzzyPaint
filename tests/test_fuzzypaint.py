@@ -121,6 +121,37 @@ class XmlConversionTests(unittest.TestCase):
         self.assertTrue(changed)
         self.assertIn(b'paint_fuzzy_skin="4"', converted)
 
+    def test_planar_protection_merges_across_duplicated_seam_vertices(self):
+        # Two coplanar triangles forming one 10x10 flat square (100mm2), but
+        # exported the way many tools split a UV/hard-normal seam: the second
+        # triangle references *duplicate* vertex entries (indices 4, 5) for
+        # the same two physical points the first triangle uses (indices 0, 2),
+        # rather than reusing those same index numbers. Each triangle alone is
+        # only 50mm2, under this test's 60mm2 threshold -- so this only passes
+        # if connectivity is matched by vertex position, not raw index, and
+        # the two triangles are recognised as one connected 100mm2 patch.
+        xml = b'''<object id="1"><mesh><vertices>
+          <vertex x="0" y="0" z="0"/><vertex x="10" y="0" z="0"/>
+          <vertex x="10" y="10" z="0"/><vertex x="0" y="10" z="0"/>
+          <vertex x="0" y="0" z="0"/><vertex x="10" y="10" z="0"/>
+        </vertices><triangles>
+          <triangle v1="0" v2="1" v3="2" paint_color="8"/>
+          <triangle v1="4" v2="5" v3="3" paint_color="8"/>
+        </triangles></mesh></object>'''
+        report = ConversionReport()
+        converted, changed = convert_model_xml(
+            xml,
+            slots={2},
+            protect_planar=True,
+            planar_minimum_area_mm2=60.0,
+            report=report,
+        )
+        self.assertFalse(changed)
+        self.assertNotIn(b"paint_fuzzy_skin", converted)
+        self.assertEqual(report.planar_patches_protected, 1)
+        self.assertEqual(report.planar_triangles_protected, 2)
+        self.assertAlmostEqual(report.planar_area_protected_mm2, 100.0)
+
 
 class ArchiveTests(unittest.TestCase):
     def test_step_one_explains_when_a_sliced_file_was_selected(self):
@@ -907,22 +938,38 @@ class FilenameTests(unittest.TestCase):
         self.assertEqual(clean_sliced_output_base("Project_part.gcode.3mf"), "Project_part")
 
     def test_prepared_name_does_not_repeat_suffix(self):
-        self.assertEqual(suggest_prepared_project_name("Tower.3mf"), "Tower (C2F-Prepped).3mf")
-        self.assertEqual(suggest_prepared_project_name("Tower-prepared.3mf"), "Tower (C2F-Prepped).3mf")
-        self.assertEqual(suggest_prepared_project_name("Tower (C2F-Prepped).3mf"), "Tower (C2F-Prepped v2).3mf")
+        self.assertEqual(suggest_prepared_project_name("Tower.3mf"), "Tower (FP-Prepped).3mf")
+        self.assertEqual(suggest_prepared_project_name("Tower-prepared.3mf"), "Tower (FP-Prepped).3mf")
+        self.assertEqual(suggest_prepared_project_name("Tower (FP-Prepped).3mf"), "Tower (FP-Prepped v2).3mf")
+
+    def test_prepared_name_also_recognises_the_old_c2f_suffix(self):
+        # Re-running FuzzyPaint on a file named by an older version (back when
+        # the tool was called Colour2Fuzz) must still strip that old suffix
+        # instead of appending a second, unrelated one.
+        self.assertEqual(suggest_prepared_project_name("Tower (C2F-Prepped).3mf"), "Tower (FP-Prepped v2).3mf")
 
     def test_three_stage_names(self):
         self.assertEqual(
-            suggest_created_package_name("Tower (C2F-Prepped).3mf"),
-            "Tower (C2F-Created).gcode.3mf",
+            suggest_created_package_name("Tower (FP-Prepped).3mf"),
+            "Tower (FP-Created).gcode.3mf",
         )
         self.assertEqual(
-            suggest_print_package_name("Tower (C2F-Created)_Bridge Tower.gcode.3mf"),
-            "Tower (C2F-Print).gcode.3mf",
+            suggest_print_package_name("Tower (FP-Created)_Bridge Tower.gcode.3mf"),
+            "Tower (FP-Print_Ready).gcode.3mf",
         )
         self.assertEqual(
             suggest_print_package_name("Tower-prepared_Bridge Tower.gcode.3mf"),
-            "Tower (C2F-Print).gcode.3mf",
+            "Tower (FP-Print_Ready).gcode.3mf",
+        )
+
+    def test_three_stage_names_also_recognise_the_old_c2f_suffix(self):
+        self.assertEqual(
+            suggest_created_package_name("Tower (C2F-Prepped).3mf"),
+            "Tower (FP-Created).gcode.3mf",
+        )
+        self.assertEqual(
+            suggest_print_package_name("Tower (C2F-Created)_Bridge Tower.gcode.3mf"),
+            "Tower (FP-Print_Ready).gcode.3mf",
         )
 
 

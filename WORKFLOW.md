@@ -31,7 +31,7 @@ In **1 Prepare project**:
    `.gcode.3mf` here.
 2. Choose the painted colour slot used as the texture mask, such as `2`.
 3. Choose a new output filename. For example:
-   `RelicRush_BridgeTower (C2F-Prepped).3mf`.
+   `RelicRush_BridgeTower (FP-Prepped).3mf`.
 4. Enable the advanced settings when changing fuzzy texture. A useful starting
    point for dense moss with a 0.4 mm nozzle is:
    - Thickness: `0.25 mm`
@@ -71,17 +71,17 @@ There is no required intermediate Save command after slicing. Saving the
 editable project is optional. For the exported sliced file, any clear name is
 valid, for example:
 
-`RelicRush_BridgeTower (C2F-Created).gcode.3mf`
+`RelicRush_BridgeTower (FP-Created).gcode.3mf`
 
 Bambu Studio may append the plate name, producing something such as
-`RelicRush_BridgeTower (C2F-Created)_Bridge Tower.gcode.3mf`. That is harmless.
+`RelicRush_BridgeTower (FP-Created)_Bridge Tower.gcode.3mf`. That is harmless.
 FuzzyPaint removes a repeated plate name from its suggested final filename.
 
 ## Step 2: create the printable single-filament file
 
 In **2 Create single-filament file**:
 
-1. Choose either the prepared `(C2F-Prepped).3mf` project for automatic slicing,
+1. Choose either the prepared `(FP-Prepped).3mf` project for automatic slicing,
    or a raw plate-sliced `.gcode.3mf` exported manually from Bambu Studio.
 2. Select the painted colour slot whose boundaries should become physical
    outline detours.
@@ -90,14 +90,14 @@ In **2 Create single-filament file**:
 4. Click **Create single-filament print file**.
 
 The finished file should normally end in
-`(C2F-Print).gcode.3mf`. Open it in Bambu Studio and verify:
+`(FP-Print_Ready).gcode.3mf`. Open it in Bambu Studio and verify:
 
 - Filament change times: `0`
 - Only one model filament is used
 - No prime tower toolpaths remain
 - Outline detours and fuzzy texture look correct across the complete Preview
 
-Do not put the finished `(C2F-Print).gcode.3mf` through step 2 a
+Do not put the finished `(FP-Print_Ready).gcode.3mf` through step 2 a
 second time. Its temporary colour-change information has already been removed.
 
 ## File types at a glance
@@ -107,13 +107,13 @@ second time. Its temporary colour-change information has already been removed.
 | Original colour-painted `.3mf` | Editable source project | FuzzyPaint step 1 |
 | Prepared `.3mf` | Editable project containing fuzzy paint and temporary colour boundaries | FuzzyPaint step 2 (automatic) or Bambu Studio (manual fallback) |
 | Raw exported `.gcode.3mf` | Multicolour sliced package; colour changes are expected | FuzzyPaint step 2 |
-| `(C2F-Print).gcode.3mf` | Finished, already sliced single-filament print | Bambu Studio Preview, then printer |
+| `(FP-Print_Ready).gcode.3mf` | Finished, already sliced single-filament print | Bambu Studio Preview, then printer |
 
 ## Naming convention
 
-- Step 1 output: `file_name (C2F-Prepped).3mf`
-- Optional manual Bambu Studio sliced export: `file_name (C2F-Created).gcode.3mf`
-- Step 2 printable output: `file_name (C2F-Print).gcode.3mf`
+- Step 1 output: `file_name (FP-Prepped).3mf`
+- Optional manual Bambu Studio sliced export: `file_name (FP-Created).gcode.3mf`
+- Step 2 printable output: `file_name (FP-Print_Ready).gcode.3mf`
 
 The latter two are `.gcode.3mf` packages because they contain already-sliced
 printer G-code. The tool suggests these names automatically where it controls

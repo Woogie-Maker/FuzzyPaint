@@ -10,6 +10,25 @@ The version bump happens in the same commit as the change it describes, not as a
 separate afterthought -- that's what let `APP_VERSION` drift and sit at 0.2.6
 through several real changes before this file existed.
 
+## 0.4.0
+
+- Fixed a real correctness bug in the "keep large flat areas smooth" fuzz-
+  exclusion heuristic: it matched triangle adjacency by raw vertex index, so
+  a duplicated vertex at a UV/hard-normal seam (routine on models with baked
+  texture-like geometry) could silently fragment one large flat patch into
+  several small ones, each falling under the minimum-area threshold and
+  getting fuzzed even though the whole patch should have been protected.
+  Adjacency is now matched by vertex position (rounded to tolerate float
+  noise), so patches split only by duplicate seam vertices merge correctly.
+- After "Create single-filament print file" finishes, FuzzyPaint now opens
+  (or brings forward) the output file's folder in Explorer with the file
+  selected, instead of leaving you to navigate there yourself.
+- Output filenames now use FuzzyPaint's own suffixes instead of the old
+  Colour2Fuzz ones: `(C2F-Prepped)` → `(FP-Prepped)`, `(C2F-Created)` →
+  `(FP-Created)`, `(C2F-Print)` → `(FP-Print_Ready)`. Re-running FuzzyPaint on
+  a file still named with an old `(C2F-...)` suffix still strips it correctly
+  rather than appending a second suffix.
+
 ## 0.3.1
 
 - Fixed: both tab content frames were double-padded (the notebook tab frame

@@ -297,7 +297,18 @@ def _find_planar_protection(
     angle_degrees: float,
     minimum_area_mm2: float,
 ) -> Tuple[Set[int], int, float]:
-    """Find selected painted triangles belonging to large coplanar patches."""
+    """Find selected painted triangles belonging to large coplanar patches.
+
+    Connectivity between triangles is keyed on each edge's *vertex positions*
+    (rounded to tolerate float noise), not on raw vertex indices. Exporters
+    routinely duplicate a vertex that sits on a UV/material/hard-normal seam,
+    so two triangles that are geometrically edge-adjacent can reference two
+    different index numbers for what is the same physical point -- matching
+    by index alone silently fragments one large flat patch into many small
+    disconnected components, each of which can then fall under the minimum-
+    area threshold and get fuzzed even though the whole patch should have
+    been protected.
+    """
     vertices = []
     for match in VERTEX_RE.finditer(object_xml):
         tag = match.group(0)
@@ -307,6 +318,9 @@ def _find_planar_protection(
         vertices.append(tuple(float(value) for value in coords))
     if not vertices:
         return set(), 0, 0.0
+
+    def position_key(index: int) -> Tuple[float, float, float]:
+        return tuple(round(value, 4) for value in vertices[index])
 
     parents = []
     areas = []
@@ -355,9 +369,9 @@ def _find_planar_protection(
         source_indices.append(triangle_index)
 
         for edge in (
-            tuple(sorted((indices[0], indices[1]))),
-            tuple(sorted((indices[1], indices[2]))),
-            tuple(sorted((indices[2], indices[0]))),
+            tuple(sorted((position_key(indices[0]), position_key(indices[1])))),
+            tuple(sorted((position_key(indices[1]), position_key(indices[2])))),
+            tuple(sorted((position_key(indices[2]), position_key(indices[0])))),
         ):
             neighbor = edge_owner.get(edge)
             if neighbor is None:
@@ -878,22 +892,29 @@ def clean_sliced_output_base(filename: str) -> str:
     return base
 
 
+# Stage-suffix naming: the "C2F-" prefix is the tool's old Colour2Fuzz name;
+# the regexes below still recognise it purely so that re-running FuzzyPaint on
+# an older file strips the old suffix instead of appending a second one. Only
+# "FP-" is ever generated going forward.
+_STAGE_SUFFIX_RE = r"(?:C2F|FP)-(?:Prepped|Created|Print(?:_Ready)?)"
+
+
 def suggest_prepared_project_name(filename: str) -> str:
     """Suggest the canonical stage-one project filename."""
     stem = Path(filename).stem
-    already_prepped = bool(re.search(r"\s*\(C2F-Prepped(?: v\d+)?\)$", stem, re.IGNORECASE))
-    base = re.sub(r"\s*\(C2F-(?:Prepped|Created|Print)(?: v\d+)?\)$", "", stem, flags=re.IGNORECASE)
+    already_prepped = bool(re.search(r"\s*\((?:C2F|FP)-Prepped(?: v\d+)?\)$", stem, re.IGNORECASE))
+    base = re.sub(rf"\s*\({_STAGE_SUFFIX_RE}(?: v\d+)?\)$", "", stem, flags=re.IGNORECASE)
     base = re.sub(r"-(?:prepared-fuzzy|prepared)$", "", base, flags=re.IGNORECASE)
-    suffix = " (C2F-Prepped v2)" if already_prepped else " (C2F-Prepped)"
+    suffix = " (FP-Prepped v2)" if already_prepped else " (FP-Prepped)"
     return base + suffix + ".3mf"
 
 
 def suggest_created_package_name(filename: str) -> str:
     """Suggest the filename to type into Bambu Studio's sliced-file export."""
     stem = Path(filename).stem
-    base = re.sub(r"\s*\(C2F-(?:Prepped|Created|Print)(?: v\d+)?\)$", "", stem, flags=re.IGNORECASE)
+    base = re.sub(rf"\s*\({_STAGE_SUFFIX_RE}(?: v\d+)?\)$", "", stem, flags=re.IGNORECASE)
     base = re.sub(r"-(?:prepared-fuzzy|prepared)$", "", base, flags=re.IGNORECASE)
-    return base + " (C2F-Created).gcode.3mf"
+    return base + " (FP-Created).gcode.3mf"
 
 
 def suggest_print_package_name(filename: str) -> str:
@@ -901,7 +922,7 @@ def suggest_print_package_name(filename: str) -> str:
     name = Path(filename).name
     stem = name[:-10] if name.lower().endswith(".gcode.3mf") else Path(name).stem
     base = re.sub(
-        r"\s*\(C2F-(?:Prepped|Created|Print)(?: v\d+)?\)(?:_[^()]*)?$",
+        rf"\s*\({_STAGE_SUFFIX_RE}(?: v\d+)?\)(?:_[^()]*)?$",
         "",
         stem,
         flags=re.IGNORECASE,
@@ -913,7 +934,7 @@ def suggest_print_package_name(filename: str) -> str:
             clean_sliced_output_base(name),
             flags=re.IGNORECASE,
         )
-    return base + " (C2F-Print).gcode.3mf"
+    return base + " (FP-Print_Ready).gcode.3mf"
 
 
 def format_report(report: ConversionReport) -> str:

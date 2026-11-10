@@ -7,6 +7,7 @@ import json
 import os
 import queue
 import re
+import subprocess
 import tempfile
 import threading
 import time
@@ -31,7 +32,7 @@ from gcode_single_filament import collapse_gcode_3mf
 from bambu_cli import archive_has_gcode, slice_project
 
 
-APP_VERSION = "0.3.1"
+APP_VERSION = "0.4.0"
 
 OUTPUT_SUBFOLDER_NAME = "FuzzyPaint Output"
 GITHUB_URL = "https://github.com/Woogie-Maker/FuzzyPaint"
@@ -44,6 +45,19 @@ PRESETS_FILE = CONFIG_DIR / "presets.json"
 def suggested_output_path(source: Path, filename: str) -> Path:
     """Place a suggested output file in a FuzzyPaint Output subfolder next to the source."""
     return source.parent / OUTPUT_SUBFOLDER_NAME / filename
+
+
+def reveal_in_explorer(path: Path) -> None:
+    """Open the file's folder in Explorer with it selected, or focus an already-open window.
+
+    Explorer itself de-duplicates: calling this when that folder is already
+    open just brings the existing window forward and (re)selects the file,
+    rather than opening a second window.
+    """
+    try:
+        subprocess.Popen(["explorer", f'/select,"{path}"'])
+    except OSError:
+        pass
 
 
 def _load_json_dict(path: Path) -> dict:
@@ -867,7 +881,7 @@ class App(tk.Tk):
     def choose_project_destination(self) -> None:
         filename = filedialog.asksaveasfilename(
             title="Save prepared project", defaultextension=".3mf", filetypes=[("3MF projects", "*.3mf")],
-            initialfile=Path(self.project_destination.get()).name if self.project_destination.get() else "model (C2F-Prepped).3mf",
+            initialfile=Path(self.project_destination.get()).name if self.project_destination.get() else "model (FP-Prepped).3mf",
         )
         if filename:
             self.project_destination.set(filename)
@@ -888,7 +902,7 @@ class App(tk.Tk):
         filename = filedialog.asksaveasfilename(
             title="Save processed sliced file", defaultextension=".gcode.3mf",
             filetypes=[("Bambu sliced packages", "*.gcode.3mf"), ("All files", "*.*")],
-            initialfile=Path(self.gcode_destination.get()).name if self.gcode_destination.get() else "model (C2F-Print).gcode.3mf",
+            initialfile=Path(self.gcode_destination.get()).name if self.gcode_destination.get() else "model (FP-Print_Ready).gcode.3mf",
         )
         if filename:
             self.gcode_destination.set(filename)
@@ -1096,6 +1110,7 @@ class App(tk.Tk):
                 f"Remaining colour-change blocks: {validation['toolchanges']}"
             )
             self.gcode_status.set(f"Ready for Bambu Studio Preview:\n{destination}")
+            reveal_in_explorer(destination)
             messagebox.showinfo("Sliced-file processing complete", summary)
 
         self._start_job(
