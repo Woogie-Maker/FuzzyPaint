@@ -31,6 +31,13 @@ from bambu_cli import archive_has_gcode, slice_project
 
 APP_VERSION = "0.2.6"
 
+OUTPUT_SUBFOLDER_NAME = "FuzzyPaint Output"
+
+
+def suggested_output_path(source: Path, filename: str) -> Path:
+    """Place a suggested output file in a FuzzyPaint Output subfolder next to the source."""
+    return source.parent / OUTPUT_SUBFOLDER_NAME / filename
+
 
 PRESETS = {
     "Balanced — proven settings": (0.24, 0.10, 0.55, 0.21, 0.10, 1.20, 0.00),
@@ -508,7 +515,9 @@ class App(tk.Tk):
         if filename:
             self.project_source.set(filename)
             path = Path(filename)
-            self.project_destination.set(str(path.with_name(suggest_prepared_project_name(path.name))))
+            self.project_destination.set(
+                str(suggested_output_path(path, suggest_prepared_project_name(path.name)))
+            )
 
     def choose_project_destination(self) -> None:
         filename = filedialog.asksaveasfilename(
@@ -526,7 +535,9 @@ class App(tk.Tk):
         if filename:
             self.gcode_source.set(filename)
             path = Path(filename)
-            self.gcode_destination.set(str(path.with_name(suggest_print_package_name(path.name))))
+            self.gcode_destination.set(
+                str(suggested_output_path(path, suggest_print_package_name(path.name)))
+            )
 
     def choose_gcode_destination(self) -> None:
         filename = filedialog.asksaveasfilename(
