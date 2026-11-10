@@ -421,21 +421,26 @@ class App(tk.Tk):
             text="Remove embedded guides, pictures and downloads (recommended for faster transfer)",
             variable=self.strip_attachments,
         ).grid(row=5, column=0, columnspan=3, sticky="w", pady=(7, 2))
+        ttk.Label(
+            form,
+            text="All three below are enabled by default and recommended for this workflow:",
+            foreground="#555555",
+        ).grid(row=6, column=0, columnspan=3, sticky="w", pady=(10, 0))
         ttk.Checkbutton(
             form,
-            text="Disable retractions before automatic slicing (recommended; default)",
+            text="Disable retractions before automatic slicing",
             variable=self.disable_retractions,
-        ).grid(row=6, column=0, columnspan=3, sticky="w", pady=(7, 2))
+        ).grid(row=7, column=0, columnspan=3, sticky="w", pady=(2, 2))
         ttk.Checkbutton(
             form,
-            text="Disable wipe while retracting before automatic slicing (recommended; default)",
+            text="Disable wipe while retracting before automatic slicing",
             variable=self.disable_wipe,
-        ).grid(row=7, column=0, columnspan=3, sticky="w", pady=(4, 2))
+        ).grid(row=8, column=0, columnspan=3, sticky="w", pady=(4, 2))
         ttk.Checkbutton(
             form,
-            text="Use sloped Z-hop before automatic slicing (recommended; default)",
+            text="Use sloped Z-hop before automatic slicing",
             variable=self.force_sloped_z_hop,
-        ).grid(row=8, column=0, columnspan=3, sticky="w", pady=(4, 2))
+        ).grid(row=9, column=0, columnspan=3, sticky="w", pady=(4, 2))
 
         ttk.Checkbutton(
             tab,
