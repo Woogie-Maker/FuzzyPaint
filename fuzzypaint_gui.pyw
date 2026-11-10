@@ -61,9 +61,9 @@ def _save_json_dict(path: Path, data: dict) -> None:
 
 def _insert_formatted(text_widget: tk.Text, source: str) -> None:
     """Render a small Markdown-like subset (#, ##, blank-line paragraphs) into a Text widget."""
-    text_widget.tag_configure("h1", font=("Segoe UI", 13, "bold"), spacing1=12, spacing3=6)
-    text_widget.tag_configure("h2", font=("Segoe UI", 10, "bold"), spacing1=10, spacing3=4)
-    text_widget.tag_configure("body", font=("Segoe UI", 10), spacing3=10)
+    text_widget.tag_configure("h1", font=("Segoe UI", 16, "bold"), spacing1=12, spacing3=6)
+    text_widget.tag_configure("h2", font=("Segoe UI", 13, "bold"), spacing1=10, spacing3=4)
+    text_widget.tag_configure("body", font=("Segoe UI", 12), spacing3=10)
     for block in source.strip("\n").split("\n\n"):
         block = block.strip("\n")
         if not block:
@@ -249,14 +249,12 @@ class App(tk.Tk):
     def _build_prepare_tab(self) -> None:
         tab = self._scrollable_content(self.prepare_tab)
         tab.columnconfigure(0, weight=1)
-        ttk.Label(
-            tab,
-            text=(
-                "Prepare the painted project for multicolour slicing. A new project is created; "
-                "your original file is left untouched."
-            ),
-            wraplength=760,
-        ).grid(row=0, column=0, sticky="w", pady=(0, 10))
+        intro = ttk.Frame(tab)
+        intro.grid(row=0, column=0, sticky="w", pady=(0, 10))
+        ttk.Label(intro, text="Prepare the painted project for Fuzzy multicolour slicing.").pack(side="left")
+        intro_help = ttk.Label(intro, text="  ?", cursor="question_arrow", foreground="#555555")
+        intro_help.pack(side="left")
+        ToolTip(intro_help, "A new .3mf file will be created; the original file is left untouched.")
 
         self.project_source = tk.StringVar()
         self.project_destination = tk.StringVar()
@@ -614,16 +612,25 @@ class App(tk.Tk):
         webbrowser.open(GITHUB_URL)
 
     def show_help(self) -> None:
+        existing = getattr(self, "_help_window", None)
+        if existing is not None and existing.winfo_exists():
+            existing.deiconify()
+            existing.lift()
+            existing.focus_force()
+            return
         window = tk.Toplevel(self)
+        self._help_window = window
         window.title(f"About FuzzyPaint {APP_VERSION}")
-        window.geometry("680x520")
-        window.minsize(560, 420)
+        window.geometry("720x560")
+        window.minsize(600, 460)
         window.transient(self)
         body = ttk.Frame(window, padding=18)
         body.pack(fill="both", expand=True)
-        ttk.Label(body, text="FuzzyPaint", font=("Segoe UI", 15, "bold")).pack(anchor="w")
-        ttk.Label(body, text="for Bambu Studio", foreground="#555555").pack(anchor="w")
-        ttk.Label(body, text=f"Version {APP_VERSION}", foreground="#555555").pack(anchor="w", pady=(1, 12))
+        ttk.Label(body, text="FuzzyPaint", font=("Segoe UI", 18, "bold")).pack(anchor="w")
+        ttk.Label(body, text="for Bambu Studio", font=("Segoe UI", 12), foreground="#555555").pack(anchor="w")
+        ttk.Label(
+            body, text=f"Version {APP_VERSION}", font=("Segoe UI", 12), foreground="#555555"
+        ).pack(anchor="w", pady=(1, 12))
         help_text = (
             "# Why FuzzyPaint exists\n\n"
             "FuzzyPaint was created to add fuzzy skin only to the colour-painted areas of a model, "
