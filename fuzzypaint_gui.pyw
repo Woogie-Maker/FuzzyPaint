@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import ctypes
 import hashlib
 import json
 import os
 import queue
 import re
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -32,7 +34,7 @@ from gcode_single_filament import collapse_gcode_3mf
 from bambu_cli import archive_has_gcode, slice_project
 
 
-APP_VERSION = "0.4.1"
+APP_VERSION = "0.5.0"
 
 OUTPUT_SUBFOLDER_NAME = "FuzzyPaint Output"
 GITHUB_URL = "https://github.com/Woogie-Maker/FuzzyPaint"
@@ -322,14 +324,34 @@ class App(tk.Tk):
         ).pack(side="left")
 
     @staticmethod
+    def _confirm_overwrite(destination: Path) -> bool:
+        """Ask before silently overwriting an existing output file.
+
+        The suggested destination filename is the same every time a given
+        source is reprocessed (it doesn't auto-number like the prepared-
+        project suggestion does), so re-running on the same input -- for
+        example, to try a different setting -- would otherwise silently
+        replace the previous output with no warning at all.
+        """
+        if not destination.exists():
+            return True
+        return messagebox.askyesno(
+            "File already exists",
+            f"{destination.name} already exists in\n{destination.parent}\n\nOverwrite it?",
+        )
+
+    @staticmethod
     def _file_row(parent, row, label, variable, command) -> None:
         SelectableLabel(parent, text=label, width=24).grid(row=row, column=0, sticky="w", pady=7)
         ttk.Entry(parent, textvariable=variable).grid(row=row, column=1, sticky="ew", padx=(12, 8), pady=7)
         ttk.Button(parent, text="Browse…", command=command).grid(row=row, column=2, sticky="ew", pady=7)
 
     @staticmethod
-    def _number_row(parent, row, label, variable, units, hint="") -> None:
-        SelectableLabel(parent, text=label, width=28).grid(row=row, column=0, sticky="w", pady=5)
+    def _number_row(parent, row, label, variable, units, hint="", tooltip: str | None = None) -> None:
+        name_label = SelectableLabel(parent, text=label, width=28)
+        name_label.grid(row=row, column=0, sticky="w", pady=5)
+        if tooltip:
+            ToolTip(name_label, tooltip)
         ttk.Entry(parent, textvariable=variable, width=12).grid(row=row, column=1, sticky="w", padx=(12, 6), pady=5)
         SelectableLabel(
             parent, text=f"{units}  {hint}".rstrip(), foreground="#555555", width=22
@@ -498,8 +520,33 @@ class App(tk.Tk):
             tab, "Show advanced settings", self.prepare_advanced, command=self._toggle_prepare_advanced
         ).grid(row=2, column=0, sticky="w", pady=(10, 2))
         self.prepare_advanced_frame = ttk.LabelFrame(tab, text="Advanced settings", padding=12)
-        self._number_row(self.prepare_advanced_frame, 0, "Flat-surface angle tolerance", self.planar_angle, "degrees")
-        self._number_row(self.prepare_advanced_frame, 1, "Minimum protected flat area", self.planar_area, "mm²")
+        self._number_row(
+            self.prepare_advanced_frame,
+            0,
+            "Flat-surface angle tolerance",
+            self.planar_angle,
+            "degrees",
+            tooltip=(
+                "Fuzzy skin is withheld from a painted area only where it is flat enough: "
+                "adjacent surface normals must not differ by more than this many degrees. "
+                "A painted surface that is less flat than this tolerance still gets fuzzy "
+                "skin, even with “Keep large flat areas smooth” enabled. Raise this "
+                "value if a surface you expect to be excluded (such as a poorly modelled flat "
+                "mortise or mating face) is still getting fuzzed."
+            ),
+        )
+        self._number_row(
+            self.prepare_advanced_frame,
+            1,
+            "Minimum protected flat area",
+            self.planar_area,
+            "mm²",
+            tooltip=(
+                "Among the flat-enough regions found above, only ones at least this large "
+                "are withheld from fuzzy skin. Smaller flat patches still get fuzzed even if "
+                "they pass the angle tolerance."
+            ),
+        )
         self._labeled_check(
             self.prepare_advanced_frame,
             "Override fuzzy-skin process settings stored in the output project",
@@ -966,6 +1013,8 @@ class App(tk.Tk):
             messagebox.showerror("Invalid setting", str(exc))
             return
         destination = Path(self.project_destination.get())
+        if not self._confirm_overwrite(destination):
+            return
         source = self.project_source.get()
         protect_planar = self.protect_planar.get()
         disable_wipe = self.disable_wipe.get()
@@ -1052,6 +1101,8 @@ class App(tk.Tk):
         ]
         source = Path(self.gcode_source.get())
         destination = Path(self.gcode_destination.get())
+        if not self._confirm_overwrite(destination):
+            return
         strip_attachments = self.strip_attachments.get()
         disable_retractions = self.disable_retractions.get()
         disable_wipe_while_retracting = self.disable_wipe.get()
@@ -1230,5 +1281,27 @@ class App(tk.Tk):
             done(payload)
 
 
+def _declare_dpi_aware() -> None:
+    """Tell Windows this process handles its own DPI scaling.
+
+    Without this, an unmanifested Tk app is treated as DPI-unaware: Windows
+    silently bitmap-scales its window and can reposition/resize it oddly on
+    a multi-monitor setup where monitors use different scaling factors --
+    exactly the kind of "window jumped to the other monitor" behaviour this
+    can cause. Must run before the first Tk window is created. Best-effort:
+    harmless if it fails (non-Windows, or an old Windows without shcore).
+    """
+    if sys.platform != "win32":
+        return
+    try:
+        ctypes.windll.shcore.SetProcessDpiAwareness(1)  # system DPI aware
+    except (AttributeError, OSError):
+        try:
+            ctypes.windll.user32.SetProcessDPIAware()
+        except (AttributeError, OSError):
+            pass
+
+
 if __name__ == "__main__":
+    _declare_dpi_aware()
     App().mainloop()

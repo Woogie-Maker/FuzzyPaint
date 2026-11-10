@@ -10,6 +10,28 @@ The version bump happens in the same commit as the change it describes, not as a
 separate afterthought -- that's what let `APP_VERSION` drift and sit at 0.2.6
 through several real changes before this file existed.
 
+## 0.5.0
+
+- Fixed a real gap: re-running the single-filament step (or the prepare
+  step) on the same input with the same destination filename -- e.g. to try
+  a different angle tolerance or outline setting -- silently overwrote the
+  previous output with no warning, since the suggested filename doesn't
+  auto-number like the prepared-project suggestion does, and there was no
+  check in the write path either. Both steps now confirm before overwriting
+  an existing destination file.
+- Added a tooltip to "Flat-surface angle tolerance" and "Minimum protected
+  flat area" explaining what they actually do in plain terms, and when to
+  raise the angle tolerance (a painted surface that should be excluded from
+  fuzzy skin but isn't, because the underlying mesh isn't flat enough within
+  the current tolerance).
+- The app now declares itself DPI-aware on Windows before creating its first
+  window. An unmanifested Tk app is treated as DPI-unaware, which Windows
+  compensates for by bitmap-scaling and sometimes repositioning the window,
+  especially across monitors with different scaling factors -- a likely
+  contributor to a reported "window jumped to the other monitor after
+  loading" (the window-height explanation in 0.4.1 may not be the whole
+  story; this is a more direct fix for the actual Windows-level mechanism).
+
 ## 0.4.1
 
 - Fixed: `SelectableLabel` called `update_idletasks()` (a full-window layout
