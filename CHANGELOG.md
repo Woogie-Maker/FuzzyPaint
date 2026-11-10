@@ -10,6 +10,17 @@ The version bump happens in the same commit as the change it describes, not as a
 separate afterthought -- that's what let `APP_VERSION` drift and sit at 0.2.6
 through several real changes before this file existed.
 
+## 0.3.1
+
+- Fixed: both tab content frames were double-padded (the notebook tab frame
+  and the scrollable content frame inside it each added 16px on every side),
+  wasting ~32px of vertical space and forcing a scroll to reach the primary
+  action button even with advanced settings collapsed. Removed the outer
+  duplicate and made the default window a bit taller.
+- "Show advanced settings" / "Show advanced outline settings" are now a bold,
+  arrow-prefixed disclosure toggle (▸/▾) instead of a checkbox, to read as a
+  section expander rather than another setting to leave checked.
+
 ## 0.3.0
 
 - Output destinations in the GUI now default to a `FuzzyPaint Output` subfolder

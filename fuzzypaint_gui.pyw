@@ -31,7 +31,7 @@ from gcode_single_filament import collapse_gcode_3mf
 from bambu_cli import archive_has_gcode, slice_project
 
 
-APP_VERSION = "0.3.0"
+APP_VERSION = "0.3.1"
 
 OUTPUT_SUBFOLDER_NAME = "FuzzyPaint Output"
 GITHUB_URL = "https://github.com/Woogie-Maker/FuzzyPaint"
@@ -227,7 +227,7 @@ class App(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
         self.title("FuzzyPaint")
-        self.geometry("900x780")
+        self.geometry("900x860")
         self.minsize(800, 680)
         self.job_queue: queue.Queue | None = None
         self.job_button: ttk.Button | None = None
@@ -266,8 +266,8 @@ class App(tk.Tk):
 
         self.notebook = ttk.Notebook(outer)
         self.notebook.pack(fill="both", expand=True)
-        self.prepare_tab = ttk.Frame(self.notebook, padding=16)
-        self.gcode_tab = ttk.Frame(self.notebook, padding=16)
+        self.prepare_tab = ttk.Frame(self.notebook)
+        self.gcode_tab = ttk.Frame(self.notebook)
         self.notebook.add(self.prepare_tab, text="1  Prepare project")
         self.notebook.add(self.gcode_tab, text="2  Create single-filament file")
         self._build_prepare_tab()
@@ -363,6 +363,33 @@ class App(tk.Tk):
         label.bind("<Button-1>", toggle)
         return row
 
+    @staticmethod
+    def _disclosure_toggle(parent, text, variable: tk.BooleanVar, command=None) -> SelectableLabel:
+        """A bold, arrow-prefixed label that expands/collapses a section on click.
+
+        Used instead of a checkbox for "Show advanced ..." -- the arrow makes
+        it read as a section disclosure rather than another setting to leave
+        checked, and it stands out more than a same-weight checkbox caption.
+        """
+        display = tk.StringVar()
+
+        def refresh(*_args) -> None:
+            display.set(("▾ " if variable.get() else "▸ ") + text)
+
+        variable.trace_add("write", refresh)
+        refresh()
+        label = SelectableLabel(
+            parent, textvariable=display, font=("Segoe UI", 10, "bold"), cursor="hand2"
+        )
+
+        def toggle(_event=None) -> None:
+            variable.set(not variable.get())
+            if command:
+                command()
+
+        label.bind("<Button-1>", toggle)
+        return label
+
     def _build_prepare_tab(self) -> None:
         tab = self._scrollable_content(self.prepare_tab)
         tab.columnconfigure(0, weight=1)
@@ -434,7 +461,7 @@ class App(tk.Tk):
             self.strip_prepare_attachments,
         ).grid(row=7, column=0, columnspan=3, sticky="w", pady=(4, 2))
 
-        self._labeled_check(
+        self._disclosure_toggle(
             tab, "Show advanced settings", self.prepare_advanced, command=self._toggle_prepare_advanced
         ).grid(row=2, column=0, sticky="w", pady=(10, 2))
         self.prepare_advanced_frame = ttk.LabelFrame(tab, text="Advanced settings", padding=12)
@@ -549,7 +576,7 @@ class App(tk.Tk):
             form, "Use sloped Z-hop before automatic slicing", self.force_sloped_z_hop
         ).grid(row=9, column=0, columnspan=3, sticky="w", pady=(4, 2))
 
-        self._labeled_check(
+        self._disclosure_toggle(
             tab, "Show advanced outline settings", self.gcode_advanced, command=self._toggle_gcode_advanced
         ).grid(row=3, column=0, sticky="w", pady=(10, 2))
         self.gcode_advanced_frame = ttk.LabelFrame(tab, text="Advanced outline settings", padding=12)
