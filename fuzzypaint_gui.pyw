@@ -103,7 +103,9 @@ class SelectableLabel(tk.Text):
         justify: str = "left",
         **kwargs,
     ) -> None:
-        background = ttk.Style().lookup("TLabel", "background") or "SystemButtonFace"
+        style = ttk.Style()
+        background = style.lookup("TLabel", "background") or "SystemButtonFace"
+        kwargs.setdefault("cursor", "xterm")
         super().__init__(
             parent,
             wrap="word",
@@ -114,13 +116,14 @@ class SelectableLabel(tk.Text):
             padx=0,
             pady=0,
             height=1,
-            cursor="xterm",
             takefocus=False,
             **kwargs,
         )
-        if font is not None:
-            self.configure(font=font)
-        self.tag_configure("body", justify=justify, foreground=foreground or "")
+        # Tk's Text widget doesn't pick up the ttk theme's label font on its own,
+        # so match it explicitly unless the caller asked for something specific.
+        self.configure(font=font or style.lookup("TLabel", "font") or "TkDefaultFont")
+        self._foreground = foreground or ""
+        self.tag_configure("body", justify=justify, foreground=self._foreground)
         self.bind("<Key>", lambda _event: "break")
         self.bind("<Configure>", self._resize, add="+")
         self._textvariable = textvariable
@@ -146,6 +149,15 @@ class SelectableLabel(tk.Text):
         height = max(1, lines[0] if lines else 1)
         if int(self.cget("height")) != height:
             self.configure(height=height)
+
+    def set_enabled(self, enabled: bool) -> None:
+        """Dim/undim this label's text to mirror a ttk widget's disabled look.
+
+        The widget itself always stays Tk-state "disabled" (that's what makes
+        it read-only-but-selectable); this only changes its foreground colour
+        so it visually greys out alongside real widgets in the same panel.
+        """
+        self.tag_configure("body", foreground=self._foreground if enabled else "#999999")
 
 
 class ToolTip:
@@ -225,16 +237,17 @@ class App(tk.Tk):
         outer.pack(fill="both", expand=True)
         header = ttk.Frame(outer)
         header.pack(fill="x")
-        ttk.Label(header, text="FuzzyPaint", font=("Segoe UI", 18, "bold")).pack(side="left")
+        SelectableLabel(header, text="FuzzyPaint", font=("Segoe UI", 18, "bold"), width=12).pack(side="left")
         ttk.Button(header, text="About / Help", command=self.show_help).pack(side="right")
-        ttk.Label(
+        SelectableLabel(
             outer,
             text="for Bambu Studio — Turn painted colours into surface texture and single-filament detail.",
+            width=90,
         ).pack(anchor="w", pady=(2, 10))
 
         toolbar = ttk.Frame(outer)
         toolbar.pack(fill="x", pady=(0, 10))
-        ttk.Label(toolbar, text="Preset:").pack(side="left")
+        SelectableLabel(toolbar, text="Preset:", width=8).pack(side="left")
         self.preset_choice = tk.StringVar()
         self.preset_combo = ttk.Combobox(
             toolbar, textvariable=self.preset_choice, state="readonly", width=24
@@ -277,15 +290,17 @@ class App(tk.Tk):
 
     @staticmethod
     def _file_row(parent, row, label, variable, command) -> None:
-        ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w", pady=7)
+        SelectableLabel(parent, text=label, width=24).grid(row=row, column=0, sticky="w", pady=7)
         ttk.Entry(parent, textvariable=variable).grid(row=row, column=1, sticky="ew", padx=(12, 8), pady=7)
         ttk.Button(parent, text="Browse…", command=command).grid(row=row, column=2, sticky="ew", pady=7)
 
     @staticmethod
     def _number_row(parent, row, label, variable, units, hint="") -> None:
-        ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w", pady=5)
+        SelectableLabel(parent, text=label, width=28).grid(row=row, column=0, sticky="w", pady=5)
         ttk.Entry(parent, textvariable=variable, width=12).grid(row=row, column=1, sticky="w", padx=(12, 6), pady=5)
-        ttk.Label(parent, text=f"{units}  {hint}".rstrip(), foreground="#555555").grid(row=row, column=2, sticky="w", pady=5)
+        SelectableLabel(
+            parent, text=f"{units}  {hint}".rstrip(), foreground="#555555", width=22
+        ).grid(row=row, column=2, sticky="w", pady=5)
 
     def _scrollable_content(self, host) -> ttk.Frame:
         canvas = tk.Canvas(host, highlightthickness=0, borderwidth=0)
@@ -323,16 +338,40 @@ class App(tk.Tk):
 
     @staticmethod
     def _text_setting_row(parent, row, label, variable) -> None:
-        ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w", pady=5)
+        SelectableLabel(parent, text=label, width=22).grid(row=row, column=0, sticky="w", pady=5)
         ttk.Entry(parent, textvariable=variable, width=18).grid(row=row, column=1, sticky="w", padx=(12, 6), pady=5)
+
+    @staticmethod
+    def _labeled_check(parent, text, variable, command=None) -> ttk.Frame:
+        """A Checkbutton with its caption as a separate, copyable SelectableLabel.
+
+        ttk.Checkbutton's own `text` is drawn by the widget itself and can
+        never be selected/copied, so the caption lives beside it instead;
+        clicking the caption still toggles the checkbox like a normal label.
+        """
+        row = ttk.Frame(parent)
+        check = ttk.Checkbutton(row, variable=variable, command=command)
+        check.pack(side="left")
+        label = SelectableLabel(row, text=text, width=max(20, len(text)))
+        label.pack(side="left")
+
+        def toggle(_event=None) -> None:
+            variable.set(not variable.get())
+            if command:
+                command()
+
+        label.bind("<Button-1>", toggle)
+        return row
 
     def _build_prepare_tab(self) -> None:
         tab = self._scrollable_content(self.prepare_tab)
         tab.columnconfigure(0, weight=1)
         intro = ttk.Frame(tab)
         intro.grid(row=0, column=0, sticky="w", pady=(0, 10))
-        ttk.Label(intro, text="Prepare the painted project for Fuzzy multicolour slicing.").pack(side="left")
-        intro_help = ttk.Label(intro, text="  ?", cursor="question_arrow", foreground="#555555")
+        SelectableLabel(
+            intro, text="Prepare the painted project for Fuzzy multicolour slicing.", width=60
+        ).pack(side="left")
+        intro_help = SelectableLabel(intro, text="  ?", width=2, cursor="question_arrow", foreground="#555555")
         intro_help.pack(side="left")
         ToolTip(intro_help, "A new .3mf file will be created; the original file is left untouched.")
 
@@ -365,8 +404,8 @@ class App(tk.Tk):
         self._file_row(form, 1, "Save prepared copy as", self.project_destination, self.choose_project_destination)
         fuzz_label = ttk.Frame(form)
         fuzz_label.grid(row=2, column=0, sticky="w", pady=7)
-        ttk.Label(fuzz_label, text="Add fuzz to painted colour(s)").pack(side="left")
-        help_icon = ttk.Label(fuzz_label, text="  ?", cursor="question_arrow", foreground="#555555")
+        SelectableLabel(fuzz_label, text="Add fuzz to painted colour(s)", width=30).pack(side="left")
+        help_icon = SelectableLabel(fuzz_label, text="  ?", width=2, cursor="question_arrow", foreground="#555555")
         help_icon.pack(side="left")
         ToolTip(
             help_icon,
@@ -375,52 +414,43 @@ class App(tk.Tk):
             "filament—such as the vine—are left unchanged.",
         )
         ttk.Entry(form, textvariable=self.project_slots).grid(row=2, column=1, sticky="ew", padx=(12, 8), pady=7)
-        ttk.Checkbutton(
-            form,
-            text="Keep large flat areas smooth (recommended for slots and fitting surfaces)",
-            variable=self.protect_planar,
+        self._labeled_check(
+            form, "Keep large flat areas smooth (recommended for slots and fitting surfaces)", self.protect_planar
         ).grid(row=3, column=0, columnspan=3, sticky="w", pady=(7, 2))
-        ttk.Checkbutton(
-            form,
-            text="Disable retractions (recommended for this single-filament workflow)",
-            variable=self.disable_retractions,
+        self._labeled_check(
+            form, "Disable retractions (recommended for this single-filament workflow)", self.disable_retractions
         ).grid(row=4, column=0, columnspan=3, sticky="w", pady=(4, 2))
-        ttk.Checkbutton(
+        self._labeled_check(
             form,
-            text="Disable wipe while retracting (recommended for this single-filament workflow)",
-            variable=self.disable_wipe,
+            "Disable wipe while retracting (recommended for this single-filament workflow)",
+            self.disable_wipe,
         ).grid(row=5, column=0, columnspan=3, sticky="w", pady=(4, 2))
-        ttk.Checkbutton(
-            form,
-            text="Use sloped Z-hop for every filament (recommended)",
-            variable=self.force_sloped_z_hop,
+        self._labeled_check(
+            form, "Use sloped Z-hop for every filament (recommended)", self.force_sloped_z_hop
         ).grid(row=6, column=0, columnspan=3, sticky="w", pady=(4, 2))
-        ttk.Checkbutton(
+        self._labeled_check(
             form,
-            text="Remove embedded guides and downloads from the prepared copy (faster)",
-            variable=self.strip_prepare_attachments,
+            "Remove embedded guides and downloads from the prepared copy (faster)",
+            self.strip_prepare_attachments,
         ).grid(row=7, column=0, columnspan=3, sticky="w", pady=(4, 2))
 
-        ttk.Checkbutton(
-            tab,
-            text="Show advanced settings",
-            variable=self.prepare_advanced,
-            command=self._toggle_prepare_advanced,
+        self._labeled_check(
+            tab, "Show advanced settings", self.prepare_advanced, command=self._toggle_prepare_advanced
         ).grid(row=2, column=0, sticky="w", pady=(10, 2))
         self.prepare_advanced_frame = ttk.LabelFrame(tab, text="Advanced settings", padding=12)
         self._number_row(self.prepare_advanced_frame, 0, "Flat-surface angle tolerance", self.planar_angle, "degrees")
         self._number_row(self.prepare_advanced_frame, 1, "Minimum protected flat area", self.planar_area, "mm²")
-        ttk.Checkbutton(
+        self._labeled_check(
             self.prepare_advanced_frame,
-            text="Override fuzzy-skin process settings stored in the output project",
-            variable=self.override_fuzzy,
+            "Override fuzzy-skin process settings stored in the output project",
+            self.override_fuzzy,
             command=self._toggle_fuzzy_settings,
         ).grid(row=2, column=0, columnspan=3, sticky="w", pady=(8, 3))
         self.fuzzy_frame = ttk.Frame(self.prepare_advanced_frame)
         self.fuzzy_frame.grid(row=3, column=0, columnspan=3, sticky="ew")
         self._number_row(self.fuzzy_frame, 0, "Thickness", self.fuzzy_thickness, "mm")
         self._number_row(self.fuzzy_frame, 1, "Point distance", self.fuzzy_distance, "mm")
-        ttk.Checkbutton(self.fuzzy_frame, text="Fuzzy skin on first layer", variable=self.fuzzy_first_layer).grid(
+        self._labeled_check(self.fuzzy_frame, "Fuzzy skin on first layer", self.fuzzy_first_layer).grid(
             row=2, column=0, columnspan=3, sticky="w", pady=4
         )
         self._text_setting_row(self.fuzzy_frame, 3, "Mode", self.fuzzy_mode)
@@ -480,51 +510,47 @@ class App(tk.Tk):
         form.columnconfigure(1, weight=1)
         self._file_row(form, 0, "Prepared project / sliced file", self.gcode_source, self.choose_gcode_source)
         self._file_row(form, 1, "Save finished print file as", self.gcode_destination, self.choose_gcode_destination)
-        ttk.Label(form, text="Painted colour slot(s) to outline").grid(row=2, column=0, sticky="w", pady=7)
+        SelectableLabel(form, text="Painted colour slot(s) to outline", width=32).grid(
+            row=2, column=0, sticky="w", pady=7
+        )
         ttk.Entry(form, textvariable=self.gcode_slots).grid(row=2, column=1, sticky="ew", padx=(12, 8), pady=7)
-        ttk.Label(form, text="Use Bambu's number: 2 or 2,4", foreground="#555555").grid(row=2, column=2, sticky="w")
-        ttk.Label(form, text="Preset").grid(row=3, column=0, sticky="w", pady=7)
+        SelectableLabel(form, text="Use Bambu's number: 2 or 2,4", foreground="#555555", width=26).grid(
+            row=2, column=2, sticky="w"
+        )
+        SelectableLabel(form, text="Preset", width=10).grid(row=3, column=0, sticky="w", pady=7)
         preset = ttk.Combobox(form, textvariable=self.gcode_preset, state="readonly", values=tuple(PRESETS))
         preset.grid(row=3, column=1, columnspan=2, sticky="ew", padx=(12, 0), pady=7)
         preset.bind("<<ComboboxSelected>>", lambda _event: self._apply_preset())
-        ttk.Label(form, text="Outline direction").grid(row=4, column=0, sticky="w", pady=7)
+        SelectableLabel(form, text="Outline direction", width=18).grid(row=4, column=0, sticky="w", pady=7)
         ttk.Combobox(
             form,
             textvariable=self.detour_side,
             state="readonly",
             values=("Both — complete outline", "Above painted regions", "Below painted regions"),
         ).grid(row=4, column=1, columnspan=2, sticky="ew", padx=(12, 0), pady=7)
-        ttk.Checkbutton(
+        self._labeled_check(
             form,
-            text="Remove embedded guides, pictures and downloads (recommended for faster transfer)",
-            variable=self.strip_attachments,
+            "Remove embedded guides, pictures and downloads (recommended for faster transfer)",
+            self.strip_attachments,
         ).grid(row=5, column=0, columnspan=3, sticky="w", pady=(7, 2))
-        ttk.Label(
+        SelectableLabel(
             form,
             text="All three below are enabled by default and recommended for this workflow:",
             foreground="#555555",
+            width=70,
         ).grid(row=6, column=0, columnspan=3, sticky="w", pady=(10, 0))
-        ttk.Checkbutton(
-            form,
-            text="Disable retractions before automatic slicing",
-            variable=self.disable_retractions,
+        self._labeled_check(
+            form, "Disable retractions before automatic slicing", self.disable_retractions
         ).grid(row=7, column=0, columnspan=3, sticky="w", pady=(2, 2))
-        ttk.Checkbutton(
-            form,
-            text="Disable wipe while retracting before automatic slicing",
-            variable=self.disable_wipe,
+        self._labeled_check(
+            form, "Disable wipe while retracting before automatic slicing", self.disable_wipe
         ).grid(row=8, column=0, columnspan=3, sticky="w", pady=(4, 2))
-        ttk.Checkbutton(
-            form,
-            text="Use sloped Z-hop before automatic slicing",
-            variable=self.force_sloped_z_hop,
+        self._labeled_check(
+            form, "Use sloped Z-hop before automatic slicing", self.force_sloped_z_hop
         ).grid(row=9, column=0, columnspan=3, sticky="w", pady=(4, 2))
 
-        ttk.Checkbutton(
-            tab,
-            text="Show advanced outline settings",
-            variable=self.gcode_advanced,
-            command=self._toggle_gcode_advanced,
+        self._labeled_check(
+            tab, "Show advanced outline settings", self.gcode_advanced, command=self._toggle_gcode_advanced
         ).grid(row=3, column=0, sticky="w", pady=(10, 2))
         self.gcode_advanced_frame = ttk.LabelFrame(tab, text="Advanced outline settings", padding=12)
         self._number_row(self.gcode_advanced_frame, 0, "Detour depth", self.detour_depth, "mm", "0.24 proven")
@@ -534,14 +560,17 @@ class App(tk.Tk):
         self._number_row(self.gcode_advanced_frame, 4, "Minimum detected span", self.minimum_span, "mm")
         self._number_row(self.gcode_advanced_frame, 5, "Inner-wall search distance", self.inner_search, "mm")
         self._number_row(self.gcode_advanced_frame, 6, "Same-layer colour gap", self.same_layer_gap, "mm", "0 disables it")
-        ttk.Label(self.gcode_advanced_frame, text="Paint correction ranges").grid(row=7, column=0, sticky="w", pady=5)
+        SelectableLabel(self.gcode_advanced_frame, text="Paint correction ranges", width=22).grid(
+            row=7, column=0, sticky="w", pady=5
+        )
         ttk.Entry(self.gcode_advanced_frame, textvariable=self.filament_overrides).grid(
             row=7, column=1, sticky="ew", padx=(12, 6), pady=5
         )
-        ttk.Label(
+        SelectableLabel(
             self.gcode_advanced_frame,
             text="optional: 61428-61485:2, …",
             foreground="#555555",
+            width=24,
         ).grid(row=7, column=2, sticky="w", pady=5)
         self.gcode_advanced_frame.columnconfigure(1, weight=1)
         self._toggle_gcode_advanced()
@@ -549,13 +578,13 @@ class App(tk.Tk):
         bottom = ttk.Frame(tab)
         bottom.grid(row=5, column=0, sticky="nsew", pady=(14, 0))
         bottom.columnconfigure(0, weight=1)
-        ttk.Label(
+        SelectableLabel(
             bottom,
             text=(
                 "After creation: open the finished .gcode.3mf in Bambu Studio and inspect the complete "
                 "Preview before sending it to the printer."
             ),
-            wraplength=760,
+            width=95,
         ).grid(row=0, column=0, columnspan=2, sticky="w")
         self.gcode_button = ttk.Button(bottom, text="Create single-filament print file", command=self.process_gcode)
         self.gcode_button.grid(row=1, column=1, sticky="e", pady=(10, 0))
@@ -567,12 +596,20 @@ class App(tk.Tk):
             self.prepare_advanced_frame.grid_remove()
 
     def _toggle_fuzzy_settings(self) -> None:
-        state = "normal" if self.override_fuzzy.get() else "disabled"
-        for child in self.fuzzy_frame.winfo_children():
-            try:
-                child.configure(state=state)
-            except tk.TclError:
-                pass
+        enabled = self.override_fuzzy.get()
+
+        def walk(widget) -> None:
+            for child in widget.winfo_children():
+                if isinstance(child, SelectableLabel):
+                    child.set_enabled(enabled)
+                else:
+                    try:
+                        child.configure(state="normal" if enabled else "disabled")
+                    except tk.TclError:
+                        pass
+                walk(child)
+
+        walk(self.fuzzy_frame)
 
     def _toggle_gcode_advanced(self) -> None:
         if self.gcode_advanced.get():
@@ -706,10 +743,12 @@ class App(tk.Tk):
         window.transient(self)
         body = ttk.Frame(window, padding=18)
         body.pack(fill="both", expand=True)
-        ttk.Label(body, text="FuzzyPaint", font=("Segoe UI", 18, "bold")).pack(anchor="w")
-        ttk.Label(body, text="for Bambu Studio", font=("Segoe UI", 12), foreground="#555555").pack(anchor="w")
-        ttk.Label(
-            body, text=f"Version {APP_VERSION}", font=("Segoe UI", 12), foreground="#555555"
+        SelectableLabel(body, text="FuzzyPaint", font=("Segoe UI", 18, "bold"), width=12).pack(anchor="w")
+        SelectableLabel(
+            body, text="for Bambu Studio", font=("Segoe UI", 12), foreground="#555555", width=20
+        ).pack(anchor="w")
+        SelectableLabel(
+            body, text=f"Version {APP_VERSION}", font=("Segoe UI", 12), foreground="#555555", width=20
         ).pack(anchor="w", pady=(1, 12))
         help_text = (
             "# Why FuzzyPaint exists\n\n"
