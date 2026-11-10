@@ -31,7 +31,7 @@ from gcode_single_filament import collapse_gcode_3mf
 from bambu_cli import archive_has_gcode, slice_project
 
 
-APP_VERSION = "0.2.6"
+APP_VERSION = "0.3.0"
 
 OUTPUT_SUBFOLDER_NAME = "FuzzyPaint Output"
 GITHUB_URL = "https://github.com/Woogie-Maker/FuzzyPaint"
