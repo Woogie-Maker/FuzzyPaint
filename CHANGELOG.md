@@ -10,6 +10,16 @@ The version bump happens in the same commit as the change it describes, not as a
 separate afterthought -- that's what let `APP_VERSION` drift and sit at 0.2.6
 through several real changes before this file existed.
 
+## 0.7.3
+
+- Fixed: `reveal_in_explorer()` opened Documents instead of the actual
+  output folder after a successful run. Manually wrapping the path in
+  literal quotes before handing it to `subprocess.Popen` combined with
+  Python's own Windows argument quoting to double-quote it, so
+  `explorer.exe` failed to parse the `/select,` argument and silently fell
+  back to its default folder. Passing the whole `/select,<path>` as a
+  single list item now lets `subprocess`'s own quoting wrap it correctly.
+
 ## 0.7.2
 
 - Fixed: "Keep large flat areas smooth" (planar protection) used to compare

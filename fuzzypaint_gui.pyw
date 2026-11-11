@@ -40,7 +40,7 @@ except ImportError:
     fuzzypaint_engine = None
 
 
-APP_VERSION = "0.7.2"
+APP_VERSION = "0.7.3"
 
 OUTPUT_SUBFOLDER_NAME = "FuzzyPaint Output"
 GITHUB_URL = "https://github.com/Woogie-Maker/FuzzyPaint"
@@ -70,7 +70,12 @@ def reveal_in_explorer(path: Path) -> None:
     rather than opening a second window.
     """
     try:
-        subprocess.Popen(["explorer", f'/select,"{path}"'])
+        # A single list item containing spaces is quoted correctly by
+        # subprocess's own Windows argument-quoting (list2cmdline). Manually
+        # wrapping the path in literal quotes here used to double-quote it
+        # once that quoting ran, so explorer.exe failed to parse /select,
+        # and silently fell back to opening Documents instead.
+        subprocess.Popen(["explorer", f"/select,{path}"])
     except OSError:
         pass
 
