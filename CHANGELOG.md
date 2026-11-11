@@ -10,6 +10,20 @@ The version bump happens in the same commit as the change it describes, not as a
 separate afterthought -- that's what let `APP_VERSION` drift and sit at 0.2.6
 through several real changes before this file existed.
 
+## 0.7.6
+
+- Fixed: "Keep large flat areas smooth" still left small fuzzy spots inside
+  otherwise-flat areas, even at a raised angle tolerance. Root cause: these
+  spots are genuine small physical steps in the mesh (e.g. the faint
+  outline of a boolean cut that didn't go quite deep enough to remove a
+  stone block's shape), not angle-tolerance noise -- no amount of angle
+  tuning should or could bridge a real step. Added a second pass that
+  absorbs any small leftover patch into protection if it's geometrically
+  adjacent to a patch that's already large enough to be protected on its
+  own, regardless of its own normal, since a few unfuzzed triangles inside
+  an otherwise-flat protected area would look more wrong than just
+  smoothing over the whole patch.
+
 ## 0.7.5
 
 - Fixed: `reveal_in_explorer()` still opened Documents instead of the

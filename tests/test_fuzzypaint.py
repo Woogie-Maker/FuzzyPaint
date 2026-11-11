@@ -192,6 +192,66 @@ class XmlConversionTests(unittest.TestCase):
         self.assertEqual(report.planar_triangles_protected, 3)
         self.assertAlmostEqual(report.planar_area_protected_mm2, 28.020501801195622, places=6)
 
+    def test_planar_protection_absorbs_small_island_next_to_large_patch(self):
+        # H is a flat 10x10mm square (two triangles, 100mm2 total) -- well
+        # over the 15mm2 threshold on its own. S is a small (~5.6mm2)
+        # triangle sharing an edge with H but tilted ~63 degrees off H's
+        # normal (dot = -0.447), nowhere close to the 7 degree tolerance, so
+        # it correctly fails to merge into H's patch during angle-based
+        # growth and would, on its own, be a separate sub-threshold patch
+        # that gets fuzzed. This is the "ghost outline of an incompletely
+        # cut stone block" scenario: a real small step sitting right next to
+        # an otherwise-flat area. Since S is geometrically edge-adjacent to
+        # the already-large H patch, the absorption pass should pull it
+        # into protection anyway, regardless of its own normal.
+        xml = b'''<object id="1"><mesh><vertices>
+          <vertex x="0" y="0" z="0"/><vertex x="10" y="0" z="0"/>
+          <vertex x="10" y="10" z="0"/><vertex x="0" y="10" z="0"/>
+          <vertex x="10.5" y="5" z="1"/>
+        </vertices><triangles>
+          <triangle v1="0" v2="1" v3="2" paint_color="8"/>
+          <triangle v1="0" v2="2" v3="3" paint_color="8"/>
+          <triangle v1="1" v2="2" v3="4" paint_color="8"/>
+        </triangles></mesh></object>'''
+        report = ConversionReport()
+        converted, changed = convert_model_xml(
+            xml,
+            slots={2},
+            protect_planar=True,
+            planar_angle_degrees=7.0,
+            planar_minimum_area_mm2=15.0,
+            report=report,
+        )
+        self.assertFalse(changed)
+        self.assertNotIn(b"paint_fuzzy_skin", converted)
+        self.assertEqual(report.planar_patches_protected, 1)
+        self.assertEqual(report.planar_triangles_protected, 3)
+        self.assertAlmostEqual(report.planar_area_protected_mm2, 105.59016994374948, places=6)
+
+    def test_planar_protection_leaves_isolated_small_patch_unprotected(self):
+        # A small (2mm2) triangle with no large patch anywhere nearby to be
+        # absorbed into -- it should remain fuzzed, same as before the
+        # absorption pass existed.
+        xml = b'''<object id="1"><mesh><vertices>
+          <vertex x="0" y="0" z="0"/><vertex x="2" y="0" z="0"/>
+          <vertex x="0" y="2" z="0"/>
+        </vertices><triangles>
+          <triangle v1="0" v2="1" v3="2" paint_color="8"/>
+        </triangles></mesh></object>'''
+        report = ConversionReport()
+        converted, changed = convert_model_xml(
+            xml,
+            slots={2},
+            protect_planar=True,
+            planar_angle_degrees=7.0,
+            planar_minimum_area_mm2=15.0,
+            report=report,
+        )
+        self.assertTrue(changed)
+        self.assertIn(b"paint_fuzzy_skin", converted)
+        self.assertEqual(report.planar_patches_protected, 0)
+        self.assertEqual(report.planar_triangles_protected, 0)
+
 
 class ArchiveTests(unittest.TestCase):
     def test_step_one_explains_when_a_sliced_file_was_selected(self):

@@ -321,6 +321,24 @@ def _find_planar_protection(
     out across the whole patch, while a genuine corner or fold (a real
     normal change, not noise) still fails the comparison and stops the
     patch growing through it.
+
+    A second pass then absorbs small leftover patches that sit right next
+    to a patch large enough to already be protected on its own. Some
+    models carry genuine small physical steps within an otherwise flat
+    area -- e.g. the faint outline of a boolean cut that didn't go quite
+    deep enough -- which no amount of angle-tolerance tuning should bridge,
+    because the step is real, not mesh noise. But a human looking at the
+    surface still reads the whole thing as "the flat area, with a rough
+    spot," not as a separate feature worth keeping fuzzy, and a few
+    unfuzzed triangles sitting inside a fuzzed field of equally-real
+    paint-job and tool-mark bumps would look far more out of place than
+    just smoothing over the whole patch. Any patch below the area
+    threshold that shares a geometric edge with an admitted patch (directly
+    or via a chain of other small patches) is absorbed into protection too,
+    regardless of its own normal. This can occasionally over-absorb if a
+    long chain of small patches happens to connect a flat area to a
+    genuinely different, separate feature -- accepted as a reasonable
+    trade-off given what it fixes.
     """
     vertices = []
     for match in VERTEX_RE.finditer(object_xml):
@@ -414,15 +432,63 @@ def _find_planar_protection(
                     sum_normal[axis] += normals[neighbor][axis] * areas[neighbor]
         patches.append((members, sum(areas[member] for member in members)))
 
+    # Absorb small patches that touch an already-large-enough patch (see the
+    # docstring). Build a patch-level adjacency graph from the same raw,
+    # angle-independent edge adjacency used to grow the patches above, then
+    # flood out from every patch that clears the area threshold on its own.
+    patch_of_candidate = [0] * len(areas)
+    for patch_index, (members, _total_area) in enumerate(patches):
+        for member in members:
+            patch_of_candidate[member] = patch_index
+
+    patch_neighbours: List[Set[int]] = [set() for _ in patches]
+    for candidate, neighbours in enumerate(adjacency):
+        this_patch = patch_of_candidate[candidate]
+        for neighbour in neighbours:
+            other_patch = patch_of_candidate[neighbour]
+            if other_patch != this_patch:
+                patch_neighbours[this_patch].add(other_patch)
+                patch_neighbours[other_patch].add(this_patch)
+
+    admitted = [total_area >= minimum_area_mm2 for _members, total_area in patches]
+    queue: deque = deque(index for index, ok in enumerate(admitted) if ok)
+    while queue:
+        current_patch = queue.popleft()
+        for neighbour_patch in patch_neighbours[current_patch]:
+            if not admitted[neighbour_patch]:
+                admitted[neighbour_patch] = True
+                queue.append(neighbour_patch)
+
+    admitted_candidates = {
+        member
+        for patch_index, (members, _total_area) in enumerate(patches)
+        if admitted[patch_index]
+        for member in members
+    }
+
+    # Re-group the admitted candidates by plain geometric adjacency (ignoring
+    # normals entirely) so the reported patch count/area reflect the final,
+    # merged regions rather than the original angle-based fragments.
+    visited_final: Set[int] = set()
     protected = set()
     protected_patch_count = 0
     protected_area = 0.0
-    for members, total_area in patches:
-        if total_area < minimum_area_mm2:
+    for start in admitted_candidates:
+        if start in visited_final:
             continue
+        visited_final.add(start)
+        group = [start]
+        stack = [start]
+        while stack:
+            current = stack.pop()
+            for neighbour in adjacency[current]:
+                if neighbour in admitted_candidates and neighbour not in visited_final:
+                    visited_final.add(neighbour)
+                    group.append(neighbour)
+                    stack.append(neighbour)
         protected_patch_count += 1
-        protected_area += total_area
-        for member in members:
+        protected_area += sum(areas[member] for member in group)
+        for member in group:
             protected.add(source_indices[member])
     return protected, protected_patch_count, protected_area
 
