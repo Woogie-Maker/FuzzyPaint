@@ -10,6 +10,15 @@ The version bump happens in the same commit as the change it describes, not as a
 separate afterthought -- that's what let `APP_VERSION` drift and sit at 0.2.6
 through several real changes before this file existed.
 
+## 0.7.1
+
+- Fixed: suggesting an output path for a file already sitting inside a
+  `FuzzyPaint Output` folder (e.g. loading an already-prepped project as
+  the next stage's source) nested a second `FuzzyPaint Output` folder
+  inside the first, producing an unreachable path and a `WinError 3`
+  failure. `suggested_output_path` now reuses that folder instead of
+  nesting another one inside it.
+
 ## 0.7.0
 
 - Changed: "Create single-filament print file" now runs on a Rust engine

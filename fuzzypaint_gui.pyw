@@ -40,7 +40,7 @@ except ImportError:
     fuzzypaint_engine = None
 
 
-APP_VERSION = "0.7.0"
+APP_VERSION = "0.7.1"
 
 OUTPUT_SUBFOLDER_NAME = "FuzzyPaint Output"
 GITHUB_URL = "https://github.com/Woogie-Maker/FuzzyPaint"
@@ -51,7 +51,14 @@ PRESETS_FILE = CONFIG_DIR / "presets.json"
 
 
 def suggested_output_path(source: Path, filename: str) -> Path:
-    """Place a suggested output file in a FuzzyPaint Output subfolder next to the source."""
+    """Place a suggested output file in a FuzzyPaint Output subfolder next to the source.
+
+    If the source is already inside a FuzzyPaint Output folder (e.g. it was
+    loaded as the next stage's input straight from the previous stage's
+    output), use that same folder instead of nesting another one inside it.
+    """
+    if source.parent.name == OUTPUT_SUBFOLDER_NAME:
+        return source.parent / filename
     return source.parent / OUTPUT_SUBFOLDER_NAME / filename
 
 
