@@ -1,4 +1,5 @@
 mod gcode;
+mod grid;
 mod segments;
 mod single_filament;
 
@@ -82,6 +83,60 @@ mod fuzzypaint_engine {
                     layer.inner.into_iter().map(PySegment::from).collect(),
                 )
             })
+            .collect()
+    }
+
+    /// Plain-tuple shape used to pass a `Segment` across the Python/Rust
+    /// boundary for the step-3 grid/neighbor-search differential tests:
+    /// `(x1, y1, x2, y2, filament, object_id, line_number, command, extrusion, i, j, feed)`.
+    type SegmentTuple = (f64, f64, f64, f64, i64, i64, usize, Vec<u8>, f64, f64, f64, Option<f64>);
+
+    fn segment_from_tuple(t: SegmentTuple) -> crate::segments::Segment {
+        crate::segments::Segment::new(t.0, t.1, t.2, t.3, t.4, t.5, t.6, t.7, t.8, t.9, t.10, t.11)
+    }
+
+    /// Port of `_aligned`.
+    #[pyfunction]
+    #[pyo3(signature = (a, b, minimum=0.35))]
+    fn aligned(a: SegmentTuple, b: SegmentTuple, minimum: f64) -> bool {
+        crate::grid::aligned(&segment_from_tuple(a), &segment_from_tuple(b), minimum)
+    }
+
+    /// Port of `_closest_point`.
+    #[pyfunction]
+    fn closest_point(px: f64, py: f64, segment: SegmentTuple) -> (f64, f64, f64) {
+        crate::grid::closest_point(px, py, &segment_from_tuple(segment))
+    }
+
+    /// Port of `_sample_points`.
+    #[pyfunction]
+    fn sample_points(segment: SegmentTuple, spacing: f64) -> Vec<(f64, f64)> {
+        crate::grid::sample_points(&segment_from_tuple(segment), spacing)
+    }
+
+    /// Port of `_polyline_length`.
+    #[pyfunction]
+    fn polyline_length(points: Vec<(f64, f64)>) -> f64 {
+        crate::grid::polyline_length(&points)
+    }
+
+    /// Builds a `_grid`-equivalent from `segments` and runs one `_nearby_point`
+    /// query against it, returning the matching segments' `line_number`s in
+    /// the same order the Python generator would yield them.
+    #[pyfunction]
+    fn nearby_segment_line_numbers(
+        segments: Vec<SegmentTuple>,
+        cell_mm: f64,
+        object_id: i64,
+        x: f64,
+        y: f64,
+        radius_mm: f64,
+    ) -> Vec<usize> {
+        let segments: Vec<crate::segments::Segment> = segments.into_iter().map(segment_from_tuple).collect();
+        let grid = crate::grid::build_grid(&segments, cell_mm);
+        crate::grid::nearby_point(&grid, &segments, object_id, x, y, radius_mm, cell_mm)
+            .into_iter()
+            .map(|index| segments[index].line_number)
             .collect()
     }
 

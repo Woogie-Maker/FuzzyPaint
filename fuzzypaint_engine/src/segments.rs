@@ -24,6 +24,58 @@ pub struct Segment {
     pub i: f64,
     pub j: f64,
     pub feed: Option<f64>,
+    // Mirrors `Segment.__post_init__` in gcode_layer_detour.py -- derived
+    // once at construction, not stored fields the caller passes in.
+    pub dx: f64,
+    pub dy: f64,
+    pub length2: f64,
+    pub length: f64,
+    pub unit_x: f64,
+    pub unit_y: f64,
+}
+
+impl Segment {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        x1: f64,
+        y1: f64,
+        x2: f64,
+        y2: f64,
+        filament: i64,
+        object_id: i64,
+        line_number: usize,
+        command: Vec<u8>,
+        extrusion: f64,
+        i: f64,
+        j: f64,
+        feed: Option<f64>,
+    ) -> Self {
+        let dx = x2 - x1;
+        let dy = y2 - y1;
+        let length2 = dx * dx + dy * dy;
+        let length = length2.sqrt();
+        let (unit_x, unit_y) = if length > 1e-12 { (dx / length, dy / length) } else { (0.0, 0.0) };
+        Segment {
+            x1,
+            y1,
+            x2,
+            y2,
+            filament,
+            object_id,
+            line_number,
+            command,
+            extrusion,
+            i,
+            j,
+            feed,
+            dx,
+            dy,
+            length2,
+            length,
+            unit_x,
+            unit_y,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -198,20 +250,20 @@ pub fn parse_wall_segments(gcode: &[u8], filament_overrides: &[(usize, usize, i6
                     break;
                 }
             }
-            let segment = Segment {
-                x1: x,
-                y1: y,
-                x2: nx,
-                y2: ny,
-                filament: segment_filament,
-                object_id: object_id.unwrap(),
+            let segment = Segment::new(
+                x,
+                y,
+                nx,
+                ny,
+                segment_filament,
+                object_id.unwrap(),
                 line_number,
-                command: command.clone(),
+                command.clone(),
                 extrusion,
-                i: fields.i.unwrap_or(0.0),
-                j: fields.j.unwrap_or(0.0),
-                feed: fields.f,
-            };
+                fields.i.unwrap_or(0.0),
+                fields.j.unwrap_or(0.0),
+                fields.f,
+            );
             if feature == b"Outer wall" {
                 outer.push(segment);
             } else {
