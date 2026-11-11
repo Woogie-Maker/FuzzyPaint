@@ -1,5 +1,6 @@
 mod gcode;
 mod grid;
+mod planner;
 mod segments;
 mod single_filament;
 
@@ -138,6 +139,62 @@ mod fuzzypaint_engine {
             .into_iter()
             .map(|index| segments[index].line_number)
             .collect()
+    }
+
+    /// Runs `plan_segment` exactly once for a freshly-constructed `subject`
+    /// segment (no cache reuse across calls -- that's an internal memoization
+    /// detail, invisible from the output), against grids built fresh from
+    /// `inner_segments`/`reference_segments`. Returns
+    /// `(original_points, [(original, shifted, continue_in, continue_out), ...])`.
+    #[pyfunction]
+    #[pyo3(signature = (
+        subject, inner_segments, reference_segments, *,
+        inset_mm=0.24, boundary_resolution_mm=0.10, transition_distance_mm=0.55,
+        endpoint_coverage_mm=0.21, inner_search_mm=1.2, minimum_span_mm=0.10, cell_mm=0.55
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn plan_segment_once(
+        subject: SegmentTuple,
+        inner_segments: Vec<SegmentTuple>,
+        reference_segments: Vec<SegmentTuple>,
+        inset_mm: f64,
+        boundary_resolution_mm: f64,
+        transition_distance_mm: f64,
+        endpoint_coverage_mm: f64,
+        inner_search_mm: f64,
+        minimum_span_mm: f64,
+        cell_mm: f64,
+    ) -> (Vec<(f64, f64)>, Vec<(Vec<(f64, f64)>, Vec<(f64, f64)>, bool, bool)>) {
+        let mut subject = segment_from_tuple(subject);
+        let inner_segments: Vec<crate::segments::Segment> =
+            inner_segments.into_iter().map(segment_from_tuple).collect();
+        let reference_segments: Vec<crate::segments::Segment> =
+            reference_segments.into_iter().map(segment_from_tuple).collect();
+        let params = crate::planner::PlanParams {
+            inset_mm,
+            boundary_resolution_mm,
+            transition_distance_mm,
+            endpoint_coverage_mm,
+            inner_search_mm,
+            minimum_span_mm,
+            cell_mm,
+        };
+        let inner_grid = crate::grid::build_grid(&inner_segments, cell_mm);
+        let reference_grid = crate::grid::build_grid(&reference_segments, cell_mm);
+        let plan = crate::planner::plan_segment(
+            &mut subject,
+            &inner_grid,
+            &inner_segments,
+            &reference_grid,
+            &reference_segments,
+            &params,
+        );
+        let spans = plan
+            .spans
+            .into_iter()
+            .map(|span| (span.original, span.shifted, span.continue_in, span.continue_out))
+            .collect();
+        (plan.original, spans)
     }
 
     /// Proves the Rust/Python round-trip end-to-end (see memory/

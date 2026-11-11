@@ -5,6 +5,8 @@
 //! the spatial grid, neighbor search, and detour planning that consume these
 //! segments are steps 3-4.
 
+use std::collections::HashMap;
+
 use crate::gcode::{
     first_token_upper, is_ascii_ws, scan_fields_bounded, split_lines_with_endings, strip, CP_END,
     CP_START, TOWER_END, TOWER_START,
@@ -32,6 +34,13 @@ pub struct Segment {
     pub length: f64,
     pub unit_x: f64,
     pub unit_y: f64,
+    // Mirrors the `interval_samples`/`interval_cumulative`/`interval_shifted`
+    // mutable cache fields `gcode_layer_interval_detour.py` adds to `Segment`
+    // -- memoized by `plan_segment` (step 4) across the (possibly several)
+    // times the same segment object gets planned.
+    pub interval_samples: Option<Vec<(f64, f64)>>,
+    pub interval_cumulative: Option<Vec<f64>>,
+    pub interval_shifted: HashMap<usize, Option<(f64, f64)>>,
 }
 
 impl Segment {
@@ -74,6 +83,9 @@ impl Segment {
             length,
             unit_x,
             unit_y,
+            interval_samples: None,
+            interval_cumulative: None,
+            interval_shifted: HashMap::new(),
         }
     }
 }
