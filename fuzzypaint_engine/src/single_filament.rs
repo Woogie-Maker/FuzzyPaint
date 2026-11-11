@@ -10,12 +10,10 @@
 //! The existing Python unit tests already exercise `_strip_marked_blocks`
 //! with those left at their defaults, which is exactly this scope.
 
-use crate::gcode::{find_e_value_bounded, first_token_upper, is_move_command, match_pure_e, scan_fields, split_lines_with_endings, strip};
-
-const CP_START: &[u8] = b"; CP TOOLCHANGE START";
-const CP_END: &[u8] = b"; CP TOOLCHANGE END";
-const TOWER_START: &[u8] = b"; WIPE_TOWER_START";
-const TOWER_END: &[u8] = b"; WIPE_TOWER_END";
+use crate::gcode::{
+    find_e_value_bounded, first_token_upper, is_move_command, match_pure_e, scan_fields,
+    split_lines_with_endings, strip, CP_END, CP_START, TOWER_END, TOWER_START,
+};
 
 #[derive(Clone, Copy)]
 struct Bounds {

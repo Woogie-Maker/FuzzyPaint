@@ -6,6 +6,12 @@
 //! `\s` meaning ASCII whitespace only in a `bytes` pattern) so that porting a
 //! function here can be verified against the original with differential tests.
 
+/// G-code markers shared by every stage of the engine.
+pub const CP_START: &[u8] = b"; CP TOOLCHANGE START";
+pub const CP_END: &[u8] = b"; CP TOOLCHANGE END";
+pub const TOWER_START: &[u8] = b"; WIPE_TOWER_START";
+pub const TOWER_END: &[u8] = b"; WIPE_TOWER_END";
+
 /// Python's `\s` in a `bytes` regex pattern (no `re.UNICODE`): ASCII whitespace.
 pub fn is_ascii_ws(b: u8) -> bool {
     matches!(b, b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c)
@@ -135,6 +141,42 @@ pub fn scan_fields(line: &[u8], letters: &[u8]) -> Vec<(u8, f64)> {
                     out.push((upper, value));
                     i = end;
                     advanced = true;
+                }
+            }
+        }
+        if !advanced {
+            i += 1;
+        }
+    }
+    out
+}
+
+/// Mirrors `re.findall(rb"(?:^|\s)([LETTERS])(-?(?:\d+(?:\.\d*)?|\.\d+))(?=\s|$)", line, re.IGNORECASE)`
+/// (the `FIELD_RE` variant used by the wall-segment parser, which additionally
+/// requires the number be followed by whitespace or end-of-line).
+///
+/// A plain greedy-match-then-check is faithful to real regex backtracking
+/// here specifically because the quantified characters (`\d` and `.`) are
+/// disjoint from the boundary character class (`\s`/end-of-string): every
+/// position *inside* the number that backtracking could retreat to lands on
+/// another digit or the literal `.`, never on whitespace, so there is never a
+/// shorter match the greedy-longest attempt could have missed.
+pub fn scan_fields_bounded(line: &[u8], letters: &[u8]) -> Vec<(u8, f64)> {
+    let mut out = Vec::new();
+    let mut i = 0usize;
+    let len = line.len();
+    while i < len {
+        let preceded_ok = i == 0 || is_ascii_ws(line[i - 1]);
+        let mut advanced = false;
+        if preceded_ok {
+            let upper = line[i].to_ascii_uppercase();
+            if letters.contains(&upper) {
+                if let Some((value, end)) = parse_number(line, i + 1) {
+                    if end == len || is_ascii_ws(line[end]) {
+                        out.push((upper, value));
+                        i = end;
+                        advanced = true;
+                    }
                 }
             }
         }
@@ -295,6 +337,17 @@ mod tests {
     #[test]
     fn scans_fields_case_insensitively() {
         assert_eq!(scan_fields(b"g1 x1 y2", b"XY"), vec![(b'X', 1.0), (b'Y', 2.0)]);
+    }
+
+    #[test]
+    fn scans_bounded_fields_rejecting_unterminated_numbers() {
+        assert_eq!(
+            scan_fields_bounded(b"G1 X100 Y100 E.8 F3000", b"XYEIJF"),
+            vec![(b'X', 100.0), (b'Y', 100.0), (b'E', 0.8), (b'F', 3000.0)]
+        );
+        // "X1abc" has no whitespace/end right after the digits -> no match,
+        // but the following "Y2" (properly terminated) still matches.
+        assert_eq!(scan_fields_bounded(b"G1 X1abc Y2", b"XY"), vec![(b'Y', 2.0)]);
     }
 
     #[test]
