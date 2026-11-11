@@ -10,6 +10,21 @@ The version bump happens in the same commit as the change it describes, not as a
 separate afterthought -- that's what let `APP_VERSION` drift and sit at 0.2.6
 through several real changes before this file existed.
 
+## 0.7.4
+
+- Fixed: text in the main window was selectable but `Ctrl+C` never copied
+  it. `SelectableLabel` bound every keypress to unconditionally swallow the
+  event (meant to block typing, but the widget's `state="disabled"` already
+  did that on its own), which also silently killed Ctrl+C and all other
+  read-only keyboard interactions.
+- Fixed: error/info/warning dialogs (native `tkinter.messagebox` popups)
+  showed text that couldn't even be selected, let alone copied -- the OS's
+  own message-box control has no selectable text, and there is no Tk
+  option to change that. Replaced every info/error/warning dialog in the
+  app with a plain window using the same selectable/copyable text widget
+  as the rest of the UI. The short "Delete this preset?" yes/no
+  confirmation still uses the native dialog.
+
 ## 0.7.3
 
 - Fixed: `reveal_in_explorer()` opened Documents instead of the actual

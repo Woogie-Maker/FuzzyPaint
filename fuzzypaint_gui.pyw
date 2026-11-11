@@ -40,7 +40,7 @@ except ImportError:
     fuzzypaint_engine = None
 
 
-APP_VERSION = "0.7.3"
+APP_VERSION = "0.7.4"
 
 OUTPUT_SUBFOLDER_NAME = "FuzzyPaint Output"
 GITHUB_URL = "https://github.com/Woogie-Maker/FuzzyPaint"
@@ -158,7 +158,11 @@ class SelectableLabel(tk.Text):
         self.configure(font=font or style.lookup("TLabel", "font") or "TkDefaultFont")
         self._foreground = foreground or ""
         self.tag_configure("body", justify=justify, foreground=self._foreground)
-        self.bind("<Key>", lambda _event: "break")
+        # state="disabled" (set in _set_text) already blocks typing on its
+        # own; a blanket `<Key>` -> "break" binding here used to also kill
+        # Ctrl+C and every other read-only keyboard interaction (arrow-key
+        # navigation, Ctrl+A), directly undermining the "mouse selection
+        # or <<Copy>>" promise this class's own docstring makes.
         self.bind("<Configure>", self._resize, add="+")
         self._textvariable = textvariable
         if textvariable is not None:
@@ -204,6 +208,37 @@ class SelectableLabel(tk.Text):
         so it visually greys out alongside real widgets in the same panel.
         """
         self.tag_configure("body", foreground=self._foreground if enabled else "#999999")
+
+
+def show_message(parent, title: str, message: str) -> None:
+    """Modal message dialog with selectable/copyable text.
+
+    `tkinter.messagebox`'s native dialogs render their text with the OS's
+    own message-box control, whose text cannot be selected at all (not even
+    read-only-selectable like SelectableLabel) -- there is no Tk option to
+    change that. This replaces it with a plain Toplevel + SelectableLabel
+    for every info/error/warning dialog in the app, so the report text,
+    error messages, and settings confirmations can all be copied.
+    """
+    window = tk.Toplevel(parent)
+    window.title(title)
+    window.transient(parent)
+    window.resizable(False, False)
+    body = ttk.Frame(window, padding=18)
+    body.pack(fill="both", expand=True)
+    SelectableLabel(body, text=message, width=64).pack(fill="both", expand=True, pady=(0, 14))
+    button_row = ttk.Frame(body)
+    button_row.pack(fill="x")
+    ok_button = ttk.Button(button_row, text="OK", command=window.destroy)
+    ok_button.pack(side="right")
+    window.bind("<Return>", lambda _event: window.destroy())
+    window.bind("<Escape>", lambda _event: window.destroy())
+    window.protocol("WM_DELETE_WINDOW", window.destroy)
+    window.update_idletasks()
+    window.geometry(f"+{parent.winfo_rootx() + 40}+{parent.winfo_rooty() + 40}")
+    window.grab_set()
+    ok_button.focus_set()
+    parent.wait_window(window)
 
 
 class ToolTip:
@@ -826,15 +861,15 @@ class App(tk.Tk):
 
     def save_settings(self) -> None:
         _save_json_dict(SETTINGS_FILE, self._collect_settings())
-        messagebox.showinfo(
-            "Settings saved", "FuzzyPaint will open with these settings next time it starts."
+        show_message(
+            self, "Settings saved", "FuzzyPaint will open with these settings next time it starts."
         )
 
     def reset_to_defaults(self) -> None:
         self._apply_settings(self._default_settings)
         self.preset_choice.set("")
-        messagebox.showinfo(
-            "Defaults restored", "All settings have been reset to FuzzyPaint's built-in defaults."
+        show_message(
+            self, "Defaults restored", "All settings have been reset to FuzzyPaint's built-in defaults."
         )
 
     def _refresh_preset_list(self) -> None:
@@ -1040,7 +1075,7 @@ class App(tk.Tk):
 
     def prepare_project(self) -> None:
         if not self.project_source.get().strip() or not self.project_destination.get().strip():
-            messagebox.showerror("Missing file", "Choose both an input and output project.")
+            show_message(self, "Missing file", "Choose both an input and output project.")
             return
         try:
             selected_slots = parse_slots(self.project_slots.get())
@@ -1048,7 +1083,7 @@ class App(tk.Tk):
             area = self._float(self.planar_area, "Minimum flat area", positive=True, zero_ok=False)
             fuzzy_settings = self._fuzzy_settings()
         except (ConversionError, ValueError) as exc:
-            messagebox.showerror("Invalid setting", str(exc))
+            show_message(self, "Invalid setting", str(exc))
             return
         destination = self._avoid_overwrite(Path(self.project_destination.get()), self.project_destination)
         source = self.project_source.get()
@@ -1091,7 +1126,8 @@ class App(tk.Tk):
                 if fuzzy_settings else
                 "Fuzzy process settings: preserved from the source project\n\n"
             )
-            messagebox.showinfo(
+            show_message(
+                self,
                 "Project ready",
                 f"Created {destination.name}\n\nPreparation time: {elapsed_text}\n\n"
                 f"{format_report(report)}\n\n{fuzzy_summary}"
@@ -1115,7 +1151,7 @@ class App(tk.Tk):
 
     def process_gcode(self) -> None:
         if not self.gcode_source.get().strip() or not self.gcode_destination.get().strip():
-            messagebox.showerror("Missing file", "Choose both an input and output sliced file.")
+            show_message(self, "Missing file", "Choose both an input and output sliced file.")
             return
         try:
             slots = parse_slots(self.gcode_slots.get())
@@ -1130,7 +1166,7 @@ class App(tk.Tk):
             gap = self._float(self.same_layer_gap, "Same-layer gap", positive=True)
             overrides = self._parse_overrides(self.filament_overrides.get())
         except ConversionError as exc:
-            messagebox.showerror("Invalid setting", str(exc))
+            show_message(self, "Invalid setting", str(exc))
             return
         side = {"Both — complete outline": "both", "Above painted regions": "upper", "Below painted regions": "lower"}[
             self.detour_side.get()
@@ -1231,7 +1267,7 @@ class App(tk.Tk):
             )
             self.gcode_status.set(f"Ready for Bambu Studio Preview:\n{destination}")
             reveal_in_explorer(destination)
-            messagebox.showinfo("Sliced-file processing complete", summary)
+            show_message(self, "Sliced-file processing complete", summary)
 
         self._start_job(
             self.gcode_button,
@@ -1294,7 +1330,7 @@ class App(tk.Tk):
 
     def _start_job(self, button, status_variable, status_text, worker, done) -> None:
         if self.job_queue is not None:
-            messagebox.showwarning("Busy", "Another conversion is already running.")
+            show_message(self, "Busy", "Another conversion is already running.")
             return
         self.job_queue = queue.Queue()
         self.job_button = button
@@ -1326,7 +1362,7 @@ class App(tk.Tk):
             button.state(["!disabled"])
         if result_type == "error":
             status_variable.set(f"Failed: {payload}")
-            messagebox.showerror("Conversion failed", str(payload))
+            show_message(self, "Conversion failed", str(payload))
         else:
             done(payload)
 
