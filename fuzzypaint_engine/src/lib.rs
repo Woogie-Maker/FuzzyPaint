@@ -1,10 +1,13 @@
+mod collapse;
 mod emit;
 mod gcode;
 mod grid;
+mod metadata;
 mod orchestrate;
 mod planner;
 mod segments;
 mod single_filament;
+mod xmltree;
 
 use pyo3::exceptions::PyValueError;
 
@@ -353,6 +356,218 @@ mod fuzzypaint_engine {
         Ok(result)
     }
 
+    /// Port of `_parse_time_text`.
+    #[pyfunction]
+    fn parse_time_text(value: &[u8]) -> i64 {
+        crate::metadata::parse_time_text(value)
+    }
+
+    /// Port of `_format_time`.
+    #[pyfunction]
+    fn format_time(seconds: f64) -> String {
+        crate::metadata::format_time(seconds)
+    }
+
+    /// Port of `_estimate_progress_times`. Returns
+    /// `(model_seconds, preparation_seconds, remaining_by_line)`.
+    #[pyfunction]
+    fn estimate_progress_times(gcode: &[u8]) -> (f64, f64, std::collections::HashMap<usize, f64>) {
+        crate::metadata::estimate_progress_times(gcode)
+    }
+
+    /// Port of `_rewrite_gcode_metadata`. Returns `(output, md5_hex,
+    /// filament_volume_mm3, filament_weight_g, estimated_model_seconds,
+    /// estimated_total_seconds)`.
+    #[pyfunction]
+    fn rewrite_gcode_metadata(gcode: &[u8], filament_length_mm: f64) -> (Vec<u8>, String, f64, f64, f64, f64) {
+        let result = crate::metadata::rewrite_gcode_metadata(gcode, filament_length_mm);
+        (
+            result.output,
+            result.md5_hex,
+            result.filament_volume_mm3,
+            result.filament_weight_g,
+            result.estimated_model_seconds,
+            result.estimated_total_seconds,
+        )
+    }
+
+    /// Port of `_rewrite_slice_info`.
+    #[pyfunction]
+    fn rewrite_slice_info(
+        data: &[u8],
+        filament_weight_g: f64,
+        filament_length_mm: f64,
+        estimated_total_seconds: f64,
+    ) -> PyResult<Vec<u8>> {
+        crate::metadata::rewrite_slice_info(data, filament_weight_g, filament_length_mm, estimated_total_seconds)
+            .map_err(super::PyValueError::new_err)
+    }
+
+    /// Port of `_rewrite_model_settings`.
+    #[pyfunction]
+    fn rewrite_model_settings(data: &[u8]) -> PyResult<Vec<u8>> {
+        crate::metadata::rewrite_model_settings(data).map_err(super::PyValueError::new_err)
+    }
+
+    /// Port of `_rewrite_plate_json`.
+    #[pyfunction]
+    fn rewrite_plate_json(data: &[u8]) -> PyResult<Vec<u8>> {
+        crate::metadata::rewrite_plate_json(data).map_err(super::PyValueError::new_err)
+    }
+
+    /// Port of `_rewrite_sequence`.
+    #[pyfunction]
+    fn rewrite_sequence(data: &[u8]) -> PyResult<Vec<u8>> {
+        crate::metadata::rewrite_sequence(data).map_err(super::PyValueError::new_err)
+    }
+
+    /// Port of `_rewrite_project_settings`.
+    #[pyfunction]
+    fn rewrite_project_settings(data: &[u8]) -> PyResult<Vec<u8>> {
+        crate::metadata::rewrite_project_settings(data).map_err(super::PyValueError::new_err)
+    }
+
+    /// Port of `collapse_gcode_3mf`. `source`/`destination` are filesystem
+    /// paths; this does real zip I/O. Returns the populated report fields
+    /// as a dict (field names match `CollapseReport`'s attributes).
+    #[pyfunction]
+    #[pyo3(signature = (source, destination, *, line_replacements=std::collections::HashMap::new(), strip_nonprint_auxiliaries=false))]
+    fn collapse_gcode_3mf<'py>(
+        py: Python<'py>,
+        source: std::path::PathBuf,
+        destination: std::path::PathBuf,
+        line_replacements: std::collections::HashMap<usize, Vec<u8>>,
+        strip_nonprint_auxiliaries: bool,
+    ) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+        let report = crate::collapse::collapse_gcode_3mf(&source, &destination, &line_replacements, strip_nonprint_auxiliaries)
+            .map_err(super::PyValueError::new_err)?;
+        let result = pyo3::types::PyDict::new(py);
+        result.set_item("toolchanges_removed", report.toolchanges_removed)?;
+        result.set_item("tower_blocks_removed", report.tower_blocks_removed)?;
+        result.set_item("kept_motion_lines", report.kept_motion_lines)?;
+        result.set_item("filament_length_mm", report.filament_length_mm)?;
+        result.set_item("filament_volume_mm3", report.filament_volume_mm3)?;
+        result.set_item("filament_weight_g", report.filament_weight_g)?;
+        result.set_item("input_gcode_bytes", report.input_gcode_bytes)?;
+        result.set_item("output_gcode_bytes", report.output_gcode_bytes)?;
+        result.set_item("groove_segments", report.groove_segments)?;
+        result.set_item("attachments_removed", report.attachments_removed)?;
+        result.set_item("attachment_bytes_removed", report.attachment_bytes_removed)?;
+        result.set_item("tower_excursions_removed", report.tower_excursions_removed)?;
+        result.set_item("orphan_unretractions_removed", report.orphan_unretractions_removed)?;
+        result.set_item("estimated_model_seconds", report.estimated_model_seconds)?;
+        result.set_item("estimated_total_seconds", report.estimated_total_seconds)?;
+        Ok(result)
+    }
+
+    /// Full pipeline in one call: parses `source`'s sliced G-code, plans
+    /// and emits the colour-boundary detours (`build_interval_detours`),
+    /// then collapses the package to a single filament
+    /// (`collapse_gcode_3mf`) writing `destination`. This is the function
+    /// `fuzzypaint_gui.pyw` should actually call.
+    #[pyfunction]
+    #[pyo3(signature = (
+        source, destination, *,
+        inset_mm=0.24, boundary_resolution_mm=0.10, transition_distance_mm=0.55,
+        endpoint_coverage_mm=0.21, inner_search_mm=1.2, minimum_span_mm=0.10,
+        same_layer_gap_mm=0.08, same_layer_endpoint_tolerance_mm=0.65,
+        detour_side="upper".to_string(), target_layers=None, subject_filaments=None,
+        filament_overrides=Vec::new(), cell_mm=0.55, strip_nonprint_auxiliaries=false
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn process_gcode_3mf<'py>(
+        py: Python<'py>,
+        source: std::path::PathBuf,
+        destination: std::path::PathBuf,
+        inset_mm: f64,
+        boundary_resolution_mm: f64,
+        transition_distance_mm: f64,
+        endpoint_coverage_mm: f64,
+        inner_search_mm: f64,
+        minimum_span_mm: f64,
+        same_layer_gap_mm: f64,
+        same_layer_endpoint_tolerance_mm: f64,
+        detour_side: String,
+        target_layers: Option<std::collections::HashSet<i64>>,
+        subject_filaments: Option<std::collections::HashSet<i64>>,
+        filament_overrides: Vec<(usize, usize, i64)>,
+        cell_mm: f64,
+        strip_nonprint_auxiliaries: bool,
+    ) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+        let side = match detour_side.as_str() {
+            "upper" => crate::orchestrate::DetourSide::Upper,
+            "lower" => crate::orchestrate::DetourSide::Lower,
+            "both" => crate::orchestrate::DetourSide::Both,
+            other => {
+                return Err(super::PyValueError::new_err(format!(
+                    "detour_side must be 'upper', 'lower', or 'both', got {:?}",
+                    other
+                )))
+            }
+        };
+
+        let file = std::fs::File::open(&source).map_err(|e| super::PyValueError::new_err(format!("cannot open source: {e}")))?;
+        let mut archive = zip::ZipArchive::new(file)
+            .map_err(|_| super::PyValueError::new_err("The input is not a valid sliced G-code 3MF".to_string()))?;
+        let gcode_name = (0..archive.len())
+            .map(|i| archive.by_index(i).map(|f| f.name().to_string()))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| super::PyValueError::new_err(format!("corrupt zip entry: {e}")))?
+            .into_iter()
+            .find(|name| name.to_lowercase().ends_with(".gcode"))
+            .ok_or_else(|| super::PyValueError::new_err("The package contains no sliced G-code"))?;
+        let mut gcode = Vec::new();
+        {
+            use std::io::Read;
+            let mut entry = archive
+                .by_name(&gcode_name)
+                .map_err(|e| super::PyValueError::new_err(format!("reading {gcode_name}: {e}")))?;
+            entry
+                .read_to_end(&mut gcode)
+                .map_err(|e| super::PyValueError::new_err(format!("reading {gcode_name}: {e}")))?;
+        }
+        drop(archive);
+
+        let layers = crate::segments::parse_wall_segments(&gcode, &filament_overrides);
+        let params = crate::orchestrate::OrchestrateParams {
+            plan: crate::planner::PlanParams {
+                inset_mm,
+                boundary_resolution_mm,
+                transition_distance_mm,
+                endpoint_coverage_mm,
+                inner_search_mm,
+                minimum_span_mm,
+                cell_mm,
+            },
+            detour_side: side,
+            target_layers,
+            subject_filaments,
+            same_layer_gap_mm,
+            same_layer_endpoint_tolerance_mm,
+        };
+        let replacements = crate::orchestrate::plan_interval_detours(layers, &params);
+
+        let report = crate::collapse::collapse_gcode_3mf(&source, &destination, &replacements, strip_nonprint_auxiliaries)
+            .map_err(super::PyValueError::new_err)?;
+        let result = pyo3::types::PyDict::new(py);
+        result.set_item("toolchanges_removed", report.toolchanges_removed)?;
+        result.set_item("tower_blocks_removed", report.tower_blocks_removed)?;
+        result.set_item("kept_motion_lines", report.kept_motion_lines)?;
+        result.set_item("filament_length_mm", report.filament_length_mm)?;
+        result.set_item("filament_volume_mm3", report.filament_volume_mm3)?;
+        result.set_item("filament_weight_g", report.filament_weight_g)?;
+        result.set_item("input_gcode_bytes", report.input_gcode_bytes)?;
+        result.set_item("output_gcode_bytes", report.output_gcode_bytes)?;
+        result.set_item("groove_segments", report.groove_segments)?;
+        result.set_item("attachments_removed", report.attachments_removed)?;
+        result.set_item("attachment_bytes_removed", report.attachment_bytes_removed)?;
+        result.set_item("tower_excursions_removed", report.tower_excursions_removed)?;
+        result.set_item("orphan_unretractions_removed", report.orphan_unretractions_removed)?;
+        result.set_item("estimated_model_seconds", report.estimated_model_seconds)?;
+        result.set_item("estimated_total_seconds", report.estimated_total_seconds)?;
+        Ok(result)
+    }
+
     /// Proves the Rust/Python round-trip end-to-end (see memory/
     /// fuzzypaint-rust-port-strategy.md step 0). Not used by the real engine.
     #[pyfunction]
@@ -375,12 +590,14 @@ mod fuzzypaint_engine {
     /// exception-type parity is deferred to when this is wired into the real
     /// pipeline (step 5 of the port).
     #[pyfunction]
+    #[pyo3(signature = (gcode, skip_ranges, line_replacements=std::collections::HashMap::new()))]
     fn strip_marked_blocks<'py>(
         py: Python<'py>,
         gcode: &[u8],
         skip_ranges: Vec<(usize, usize)>,
+        line_replacements: std::collections::HashMap<usize, Vec<u8>>,
     ) -> PyResult<(Vec<u8>, Bound<'py, pyo3::types::PyDict>)> {
-        match crate::single_filament::strip_marked_blocks(gcode, &skip_ranges) {
+        match crate::single_filament::strip_marked_blocks(gcode, &skip_ranges, &line_replacements) {
             Ok(result) => {
                 let report = pyo3::types::PyDict::new(py);
                 report.set_item("toolchanges_removed", result.toolchanges_removed)?;
@@ -388,6 +605,7 @@ mod fuzzypaint_engine {
                 report.set_item("kept_motion_lines", result.kept_motion_lines)?;
                 report.set_item("filament_length_mm", result.filament_length_mm)?;
                 report.set_item("orphan_unretractions_removed", result.orphan_unretractions_removed)?;
+                report.set_item("groove_segments", result.groove_segments)?;
                 Ok((result.output, report))
             }
             Err(message) => Err(super::PyValueError::new_err(message)),

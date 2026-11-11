@@ -10,3 +10,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 pyo3 = "0.29.0"
+quick-xml = "0.37"
+serde_json = { version = "1.0", features = ["preserve_order", "arbitrary_precision"] }
+zip = { version = "2.2", default-features = false, features = ["deflate"] }
+md-5 = "0.10"

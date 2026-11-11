@@ -1,14 +1,16 @@
-//! Port of the purely mechanical byte/line scanning in Python's
-//! `gcode_single_filament.py`: finding the unmarked travel wrapper around a
-//! Bambu wipe-tower excursion, and removing the marked tool-change/tower
-//! blocks. No geometry, no grid -- lowest-risk first step of the engine port.
+//! Port of the byte/line scanning in Python's `gcode_single_filament.py`:
+//! finding the unmarked travel wrapper around a Bambu wipe-tower excursion,
+//! removing the marked tool-change/tower blocks, and applying
+//! `line_replacements` (the detour plan from `orchestrate.rs`). No
+//! geometry, no grid.
 //!
-//! Scope deliberately excludes `groove_lines`/`coordinate_overrides`/
-//! `extrusion_scales`/`line_replacements` (the Python function's other
-//! parameters): those exist to apply line replacements produced by the
-//! detour-planning stage, which hasn't been ported yet (step 4-5 of the plan).
-//! The existing Python unit tests already exercise `_strip_marked_blocks`
-//! with those left at their defaults, which is exactly this scope.
+//! `groove_lines`/`coordinate_overrides`/`extrusion_scales` (three of the
+//! Python function's other parameters) are deliberately NOT ported: they
+//! are unused leftovers of a retired feature -- confirmed by checking
+//! `fuzzypaint_gui.pyw`'s only `collapse_gcode_3mf` call site, which never
+//! passes them.
+
+use std::collections::HashMap;
 
 use crate::gcode::{
     find_e_value_bounded, first_token_upper, is_move_command, match_pure_e, scan_fields,
@@ -230,12 +232,21 @@ pub struct StripResult {
     pub kept_motion_lines: u64,
     pub filament_length_mm: f64,
     pub orphan_unretractions_removed: u64,
+    pub groove_segments: u64,
 }
 
-/// Port of `_strip_marked_blocks`, scoped to its tool-change/tower removal,
-/// `skip_ranges` (tower-excursion) handling, and orphan-unretraction guard --
-/// see the module doc comment for what's deliberately left out for now.
-pub fn strip_marked_blocks(gcode: &[u8], skip_ranges: &[(usize, usize)]) -> Result<StripResult, String> {
+/// Port of `_strip_marked_blocks`, scoped to tool-change/tower removal,
+/// `skip_ranges` (tower-excursion) handling, the orphan-unretraction guard,
+/// and `line_replacements` (the only one of the four substitution dicts any
+/// real call site actually uses -- `groove_lines`/`coordinate_overrides`/
+/// `extrusion_scales` are unused leftovers of a retired feature; confirmed
+/// by checking fuzzypaint_gui.pyw's only `collapse_gcode_3mf` call site,
+/// which never passes them).
+pub fn strip_marked_blocks(
+    gcode: &[u8],
+    skip_ranges: &[(usize, usize)],
+    line_replacements: &HashMap<usize, Vec<u8>>,
+) -> Result<StripResult, String> {
     let mut in_cp = false;
     let mut in_tower = false;
     let mut range_iter = skip_ranges.iter();
@@ -248,11 +259,12 @@ pub fn strip_marked_blocks(gcode: &[u8], skip_ranges: &[(usize, usize)]) -> Resu
     let mut kept_motion_lines = 0u64;
     let mut filament_length_mm = 0.0f64;
     let mut orphan_unretractions_removed = 0u64;
+    let mut groove_segments = 0u64;
     let mut output: Vec<u8> = Vec::with_capacity(gcode.len());
 
-    for (index, &line) in split_lines_with_endings(gcode).iter().enumerate() {
+    for (index, &raw_line) in split_lines_with_endings(gcode).iter().enumerate() {
         let line_number = index + 1;
-        let stripped = strip(line);
+        let stripped = strip(raw_line);
 
         if stripped == CP_START {
             if in_cp || in_tower {
@@ -326,16 +338,34 @@ pub fn strip_marked_blocks(gcode: &[u8], skip_ranges: &[(usize, usize)]) -> Resu
             }
         }
 
-        output.extend_from_slice(line);
+        let line: std::borrow::Cow<[u8]> = match line_replacements.get(&line_number) {
+            Some(replacement) => {
+                groove_segments += 1;
+                if replacement.ends_with(b"\n") {
+                    std::borrow::Cow::Borrowed(replacement.as_slice())
+                } else {
+                    let mut owned = replacement.clone();
+                    owned.push(b'\n');
+                    std::borrow::Cow::Owned(owned)
+                }
+            }
+            None => std::borrow::Cow::Borrowed(raw_line),
+        };
 
-        // Equivalent to Python's `for emitted in line.splitlines(): ...`: in
-        // this scope `line` is always exactly the one original source line
-        // (no `line_replacements` substitution can introduce embedded
-        // newlines yet), so it reduces to checking `stripped` once.
-        if is_move_command(stripped) {
-            kept_motion_lines += 1;
-            if let Some(value) = find_e_value_bounded(stripped) {
-                filament_length_mm += value;
+        output.extend_from_slice(&line);
+
+        // Mirrors `for emitted in line.splitlines(): ...` -- a
+        // `line_replacements` substitution can be several G-code lines
+        // joined by `\n` (e.g. `_emit_plan`'s output), so this must walk
+        // each one, not just check `stripped` once (true when `line` is
+        // still the single original source line).
+        for emitted in split_lines_with_endings(&line) {
+            let emitted_stripped = strip(emitted);
+            if is_move_command(emitted_stripped) {
+                kept_motion_lines += 1;
+                if let Some(value) = find_e_value_bounded(emitted_stripped) {
+                    filament_length_mm += value;
+                }
             }
         }
     }
@@ -354,6 +384,7 @@ pub fn strip_marked_blocks(gcode: &[u8], skip_ranges: &[(usize, usize)]) -> Resu
         kept_motion_lines,
         filament_length_mm,
         orphan_unretractions_removed,
+        groove_segments,
     })
 }
 
@@ -398,7 +429,7 @@ G1 Z.2\n\
 G1 E.8 F1800\n\
 ; FEATURE: Outer wall\n\
 G1 X101 Y100 E.1\n";
-        let result = strip_marked_blocks(gcode, &[(4, 8)]).unwrap();
+        let result = strip_marked_blocks(gcode, &[(4, 8)], &HashMap::new()).unwrap();
         let text = String::from_utf8(result.output.clone()).unwrap();
         assert!(text.contains("G1 X100 Y100 F30000"));
         assert!(!text.contains("G1 E.8 F1800"));
@@ -419,7 +450,7 @@ G1 Z.2\n\
 G1 E.8 F1800\n\
 ; FEATURE: Outer wall\n\
 G1 X101 Y100 E.1\n";
-        let result = strip_marked_blocks(gcode, &[(4, 4)]).unwrap();
+        let result = strip_marked_blocks(gcode, &[(4, 4)], &HashMap::new()).unwrap();
         let text = String::from_utf8(result.output).unwrap();
         assert!(text.contains("G1 E.8 F1800"));
         assert_eq!(result.orphan_unretractions_removed, 0);
