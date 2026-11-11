@@ -546,10 +546,12 @@ mod fuzzypaint_engine {
             same_layer_endpoint_tolerance_mm,
         };
         let replacements = crate::orchestrate::plan_interval_detours(layers, &params);
+        let detour_count = replacements.len();
 
         let report = crate::collapse::collapse_gcode_3mf(&source, &destination, &replacements, strip_nonprint_auxiliaries)
             .map_err(super::PyValueError::new_err)?;
         let result = pyo3::types::PyDict::new(py);
+        result.set_item("detour_count", detour_count)?;
         result.set_item("toolchanges_removed", report.toolchanges_removed)?;
         result.set_item("tower_blocks_removed", report.tower_blocks_removed)?;
         result.set_item("kept_motion_lines", report.kept_motion_lines)?;

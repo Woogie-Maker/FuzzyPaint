@@ -10,6 +10,21 @@ The version bump happens in the same commit as the change it describes, not as a
 separate afterthought -- that's what let `APP_VERSION` drift and sit at 0.2.6
 through several real changes before this file existed.
 
+## 0.7.0
+
+- Changed: "Create single-filament print file" now runs on a Rust engine
+  (`fuzzypaint_engine/`) instead of pure Python, when the extension is
+  built -- roughly 7-8x faster on real test files in "both"/"upper"/"lower"
+  mode. Output is byte-for-byte identical to the Python implementation on
+  everything tested, with two documented, extremely rare exceptions that
+  have no print-physical consequence: a handful of G2/G3 arc-derived
+  coordinates can differ by 1 floating-point ULP (sin/cos/atan2 aren't
+  required to be bit-identical across math libraries), and one cosmetic
+  preview-time field in `plate_1.json` can occasionally round to an
+  equally-valid but different last digit. Falls back automatically to the
+  previous pure-Python path if the Rust extension isn't installed, so
+  behavior is unchanged for anyone not building it.
+
 ## 0.6.0
 
 - Fixed: expanding "Show advanced settings"/"Show advanced outline settings"

@@ -31,11 +31,16 @@ from fuzzypaint import (
     suggest_print_package_name,
 )
 from gcode_layer_interval_detour import build_interval_detours
-from gcode_single_filament import collapse_gcode_3mf
+from gcode_single_filament import CollapseReport, collapse_gcode_3mf
 from bambu_cli import archive_has_gcode, slice_project
 
+try:
+    import fuzzypaint_engine
+except ImportError:
+    fuzzypaint_engine = None
 
-APP_VERSION = "0.6.0"
+
+APP_VERSION = "0.7.0"
 
 OUTPUT_SUBFOLDER_NAME = "FuzzyPaint Output"
 GITHUB_URL = "https://github.com/Woogie-Maker/FuzzyPaint"
@@ -1142,19 +1147,35 @@ class App(tk.Tk):
                     )
                     sliced_source = Path(temporary) / "automatic-slice.3mf"
                     slice_project(configured_source, sliced_source)
-                replacements = build_interval_detours(
-                    sliced_source, inset_mm=depth, boundary_resolution_mm=resolution,
-                    transition_distance_mm=transition, endpoint_coverage_mm=coverage,
-                    inner_search_mm=inner_search, minimum_span_mm=minimum, same_layer_gap_mm=gap,
-                    detour_side=side, subject_filaments={slot - 1 for slot in slots},
-                    filament_overrides=overrides,
-                )
-                report = collapse_gcode_3mf(
-                    sliced_source,
-                    destination,
-                    line_replacements=replacements,
-                    strip_nonprint_auxiliaries=strip_attachments,
-                )
+                if fuzzypaint_engine is not None:
+                    # Rust engine (see fuzzypaint_engine/): parses, plans,
+                    # emits and collapses in one call. Falls back to the
+                    # pure-Python path below if the extension isn't built.
+                    engine_result = fuzzypaint_engine.process_gcode_3mf(
+                        str(sliced_source), str(destination),
+                        inset_mm=depth, boundary_resolution_mm=resolution,
+                        transition_distance_mm=transition, endpoint_coverage_mm=coverage,
+                        inner_search_mm=inner_search, minimum_span_mm=minimum, same_layer_gap_mm=gap,
+                        detour_side=side, subject_filaments={slot - 1 for slot in slots},
+                        filament_overrides=overrides, strip_nonprint_auxiliaries=strip_attachments,
+                    )
+                    detour_count = engine_result.pop("detour_count")
+                    report = CollapseReport(**engine_result)
+                else:
+                    replacements = build_interval_detours(
+                        sliced_source, inset_mm=depth, boundary_resolution_mm=resolution,
+                        transition_distance_mm=transition, endpoint_coverage_mm=coverage,
+                        inner_search_mm=inner_search, minimum_span_mm=minimum, same_layer_gap_mm=gap,
+                        detour_side=side, subject_filaments={slot - 1 for slot in slots},
+                        filament_overrides=overrides,
+                    )
+                    detour_count = len(replacements)
+                    report = collapse_gcode_3mf(
+                        sliced_source,
+                        destination,
+                        line_replacements=replacements,
+                        strip_nonprint_auxiliaries=strip_attachments,
+                    )
             validation = self._validate_sliced_package(destination)
             if expected_fuzzy is not None:
                 actual_fuzzy = (validation["fuzzy_thickness"], validation["fuzzy_distance"])
@@ -1164,10 +1185,10 @@ class App(tk.Tk):
                         f"expected {expected_fuzzy[0]} / {expected_fuzzy[1]}, "
                         f"but G-code contains {actual_fuzzy[0]} / {actual_fuzzy[1]}"
                     )
-            return replacements, report, validation, time.perf_counter() - started, automatically_sliced
+            return detour_count, report, validation, time.perf_counter() - started, automatically_sliced
 
         def done(result):
-            replacements, report, validation, elapsed_seconds, automatically_sliced = result
+            detour_count, report, validation, elapsed_seconds, automatically_sliced = result
             if elapsed_seconds >= 60:
                 minutes, seconds = divmod(elapsed_seconds, 60)
                 elapsed_text = f"{int(minutes)} min {seconds:.1f} sec"
@@ -1182,7 +1203,7 @@ class App(tk.Tk):
                 f"{'yes' if automatically_sliced and disable_wipe_while_retracting else 'no'}\n"
                 f"Sloped Z-hop forced before slicing: "
                 f"{'yes' if automatically_sliced and force_sloped_z_hop else 'no'}\n"
-                f"Detoured source moves: {len(replacements):,}\n"
+                f"Detoured source moves: {detour_count:,}\n"
                 f"Colour changes removed: {report.toolchanges_removed:,}\n"
                 f"Purge-tower blocks removed: {report.tower_blocks_removed:,}\n"
                 f"Obsolete purge-tower trips removed: {report.tower_excursions_removed:,}\n"
