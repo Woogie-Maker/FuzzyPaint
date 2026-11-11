@@ -40,7 +40,7 @@ except ImportError:
     fuzzypaint_engine = None
 
 
-APP_VERSION = "0.7.4"
+APP_VERSION = "0.7.5"
 
 OUTPUT_SUBFOLDER_NAME = "FuzzyPaint Output"
 GITHUB_URL = "https://github.com/Woogie-Maker/FuzzyPaint"
@@ -63,19 +63,23 @@ def suggested_output_path(source: Path, filename: str) -> Path:
 
 
 def reveal_in_explorer(path: Path) -> None:
-    """Open the file's folder in Explorer with it selected, or focus an already-open window.
+    """Open the file's folder in Explorer, or focus an already-open window.
 
     Explorer itself de-duplicates: calling this when that folder is already
-    open just brings the existing window forward and (re)selects the file,
-    rather than opening a second window.
+    open just brings the existing window forward rather than opening a
+    second one.
+
+    This used to pass `/select,<path>` to highlight the file itself rather
+    than just opening its folder. A double-quoting bug in that was found
+    and fixed, but even with correct quoting confirmed (checked the exact
+    command line via `subprocess.list2cmdline`, live-tested against the
+    real file), `/select,` still silently opened Documents on this machine
+    for reasons that aren't about our quoting. Opening the plain folder,
+    confirmed working live, gets the user to the right place without
+    relying on that flag at all.
     """
     try:
-        # A single list item containing spaces is quoted correctly by
-        # subprocess's own Windows argument-quoting (list2cmdline). Manually
-        # wrapping the path in literal quotes here used to double-quote it
-        # once that quoting ran, so explorer.exe failed to parse /select,
-        # and silently fell back to opening Documents instead.
-        subprocess.Popen(["explorer", f"/select,{path}"])
+        subprocess.Popen(["explorer", str(path.parent)])
     except OSError:
         pass
 

@@ -10,6 +10,17 @@ The version bump happens in the same commit as the change it describes, not as a
 separate afterthought -- that's what let `APP_VERSION` drift and sit at 0.2.6
 through several real changes before this file existed.
 
+## 0.7.5
+
+- Fixed: `reveal_in_explorer()` still opened Documents instead of the
+  output folder even after 0.7.3's quoting fix -- confirmed live that the
+  corrected command line (verified via `subprocess.list2cmdline`) still
+  made `/select,<path>` silently fail on this machine for reasons
+  unrelated to quoting. Stopped trying to select the specific file at all
+  and just open its folder directly (`explorer <folder>`, no `/select`),
+  confirmed working live against the real output path, a user-typed
+  arbitrary folder, and the usual `FuzzyPaint Output` folder.
+
 ## 0.7.4
 
 - Fixed: text in the main window was selectable but `Ctrl+C` never copied
