@@ -153,6 +153,45 @@ class XmlConversionTests(unittest.TestCase):
         self.assertEqual(report.planar_triangles_protected, 2)
         self.assertAlmostEqual(report.planar_area_protected_mm2, 100.0)
 
+    def test_planar_protection_absorbs_local_noise_via_patch_average(self):
+        # Three triangles, H-A-B, sharing edges in a chain (H-A, then A-B --
+        # B does NOT touch H directly). H is flat (20mm2). A is tilted ~4.0
+        # degrees off H. B is tilted ~4.2 degrees off H, but in a different
+        # rotational direction, such that B is ~8.0 degrees off A SPECIFICALLY
+        # (verified numerically: dot(A,B) = 0.9904 < cos(5deg) = 0.9962).
+        # With a pure pairwise (immediate-neighbour-only) comparison, B's only
+        # entry point -- the A-B edge -- fails the 5 degree tolerance, leaving
+        # B an isolated ~4mm2 patch (fuzzed, under the 15mm2 threshold) even
+        # though B itself is well within 5 degrees of the *overall* flat
+        # direction. Comparing B against the patch's accumulated average
+        # (here: H and A merged, area-weighted average dominated by H's
+        # 20mm2) instead of against A's specific normal lets B merge in too
+        # (verified: dot(average, B) = 0.9965 >= 0.9962), keeping the whole
+        # 28mm2 patch protected as the real surface clearly is.
+        xml = b'''<object id="1"><mesh><vertices>
+          <vertex x="0" y="0" z="0"/><vertex x="8" y="0" z="0"/>
+          <vertex x="0" y="5" z="0"/><vertex x="4" y="-1" z="0.07"/>
+          <vertex x="4" y="-3" z="-0.06"/>
+        </vertices><triangles>
+          <triangle v1="0" v2="1" v3="2" paint_color="8"/>
+          <triangle v1="1" v2="0" v3="3" paint_color="8"/>
+          <triangle v1="1" v2="3" v3="4" paint_color="8"/>
+        </triangles></mesh></object>'''
+        report = ConversionReport()
+        converted, changed = convert_model_xml(
+            xml,
+            slots={2},
+            protect_planar=True,
+            planar_angle_degrees=5.0,
+            planar_minimum_area_mm2=15.0,
+            report=report,
+        )
+        self.assertFalse(changed)
+        self.assertNotIn(b"paint_fuzzy_skin", converted)
+        self.assertEqual(report.planar_patches_protected, 1)
+        self.assertEqual(report.planar_triangles_protected, 3)
+        self.assertAlmostEqual(report.planar_area_protected_mm2, 28.020501801195622, places=6)
+
 
 class ArchiveTests(unittest.TestCase):
     def test_step_one_explains_when_a_sliced_file_was_selected(self):

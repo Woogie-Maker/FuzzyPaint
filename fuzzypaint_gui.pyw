@@ -40,7 +40,7 @@ except ImportError:
     fuzzypaint_engine = None
 
 
-APP_VERSION = "0.7.1"
+APP_VERSION = "0.7.2"
 
 OUTPUT_SUBFOLDER_NAME = "FuzzyPaint Output"
 GITHUB_URL = "https://github.com/Woogie-Maker/FuzzyPaint"

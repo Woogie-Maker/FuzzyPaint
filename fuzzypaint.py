@@ -15,10 +15,10 @@ import os
 import re
 import tempfile
 import zipfile
-from collections import Counter
+from collections import Counter, deque
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterable, Optional, Sequence, Set, Tuple
+from typing import Iterable, List, Optional, Sequence, Set, Tuple
 
 
 class ConversionError(ValueError):
@@ -308,6 +308,19 @@ def _find_planar_protection(
     disconnected components, each of which can then fall under the minimum-
     area threshold and get fuzzed even though the whole patch should have
     been protected.
+
+    A patch grows by comparing each candidate triangle to the patch's own
+    cumulative area-weighted average normal, not just to the immediate
+    neighbour that discovered it. Real-world meshes often carry small-scale
+    modelling noise (bumps baked into the mesh, not fuzz) where two adjacent
+    triangles can individually differ by more than the angle tolerance even
+    though the surface reads as flat to a human eye; comparing only to one
+    neighbour at a time lets that local noise fragment an otherwise flat
+    patch into sub-threshold pieces that each get fuzzed. Comparing to the
+    patch's running average instead lets gradual, noise-level drift average
+    out across the whole patch, while a genuine corner or fold (a real
+    normal change, not noise) still fails the comparison and stops the
+    patch growing through it.
     """
     vertices = []
     for match in VERTEX_RE.finditer(object_xml):
@@ -322,23 +335,12 @@ def _find_planar_protection(
     def position_key(index: int) -> Tuple[float, float, float]:
         return tuple(round(value, 4) for value in vertices[index])
 
-    parents = []
     areas = []
     normals = []
     source_indices = []
+    adjacency: List[List[int]] = []
     edge_owner = {}
     cosine_limit = math.cos(math.radians(angle_degrees))
-
-    def find(item: int) -> int:
-        while parents[item] != item:
-            parents[item] = parents[parents[item]]
-            item = parents[item]
-        return item
-
-    def union(first: int, second: int) -> None:
-        root_a, root_b = find(first), find(second)
-        if root_a != root_b:
-            parents[root_b] = root_a
 
     for triangle_index, match in enumerate(TRIANGLE_RE.finditer(object_xml)):
         tag = match.group(0)
@@ -362,11 +364,11 @@ def _find_planar_protection(
         if length <= 1e-12:
             continue
         normal = tuple(value / length for value in cross)
-        candidate = len(parents)
-        parents.append(candidate)
+        candidate = len(areas)
         areas.append(length * 0.5)
         normals.append(normal)
         source_indices.append(triangle_index)
+        adjacency.append([])
 
         for edge in (
             tuple(sorted((position_key(indices[0]), position_key(indices[1])))),
@@ -377,23 +379,52 @@ def _find_planar_protection(
             if neighbor is None:
                 edge_owner[edge] = candidate
                 continue
-            dot = sum(normals[neighbor][axis] * normal[axis] for axis in range(3))
-            if dot >= cosine_limit:
-                union(candidate, neighbor)
+            adjacency[neighbor].append(candidate)
+            adjacency[candidate].append(neighbor)
 
-    component_areas = Counter()
-    for candidate, area in enumerate(areas):
-        component_areas[find(candidate)] += area
-    protected_roots = {
-        root for root, area in component_areas.items() if area >= minimum_area_mm2
-    }
-    protected = {
-        source_indices[candidate]
-        for candidate in range(len(source_indices))
-        if find(candidate) in protected_roots
-    }
-    protected_area = sum(component_areas[root] for root in protected_roots)
-    return protected, len(protected_roots), protected_area
+    # Region-grow each patch, comparing every candidate to the patch's own
+    # cumulative area-weighted average normal (recomputed before each check,
+    # so it reflects every member merged so far) rather than to whichever
+    # single neighbour discovered it -- see the docstring for why.
+    visited = [False] * len(areas)
+    patches: List[Tuple[List[int], float]] = []
+    for start in range(len(areas)):
+        if visited[start]:
+            continue
+        visited[start] = True
+        members = [start]
+        sum_normal = [normals[start][axis] * areas[start] for axis in range(3)]
+        queue = deque([start])
+        while queue:
+            current = queue.popleft()
+            for neighbor in adjacency[current]:
+                if visited[neighbor]:
+                    continue
+                length = math.sqrt(sum(value * value for value in sum_normal))
+                if length <= 1e-12:
+                    continue
+                reference = tuple(value / length for value in sum_normal)
+                dot = sum(reference[axis] * normals[neighbor][axis] for axis in range(3))
+                if dot < cosine_limit:
+                    continue
+                visited[neighbor] = True
+                members.append(neighbor)
+                queue.append(neighbor)
+                for axis in range(3):
+                    sum_normal[axis] += normals[neighbor][axis] * areas[neighbor]
+        patches.append((members, sum(areas[member] for member in members)))
+
+    protected = set()
+    protected_patch_count = 0
+    protected_area = 0.0
+    for members, total_area in patches:
+        if total_area < minimum_area_mm2:
+            continue
+        protected_patch_count += 1
+        protected_area += total_area
+        for member in members:
+            protected.add(source_indices[member])
+    return protected, protected_patch_count, protected_area
 
 
 def _set_attribute(tag: bytes, pattern: re.Pattern, name: bytes, value: Optional[str]) -> bytes:

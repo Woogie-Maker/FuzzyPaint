@@ -10,6 +10,20 @@ The version bump happens in the same commit as the change it describes, not as a
 separate afterthought -- that's what let `APP_VERSION` drift and sit at 0.2.6
 through several real changes before this file existed.
 
+## 0.7.2
+
+- Fixed: "Keep large flat areas smooth" (planar protection) used to compare
+  each painted triangle only to its immediate neighbour's normal. Real
+  meshes often carry small-scale modelling noise (not fuzz) where two
+  adjacent triangles individually differ by more than the angle tolerance
+  even though the surface reads as flat -- that local noise could fragment
+  one large flat patch into several sub-threshold pieces, each of which
+  then got fuzzed despite the whole patch clearly being intended as flat.
+  Patches now grow by comparing each candidate triangle to the patch's own
+  cumulative area-weighted average normal instead, so noise-level drift
+  averages out across the patch while a genuine corner or fold (a real
+  normal change) still stops the patch growing through it.
+
 ## 0.7.1
 
 - Fixed: suggesting an output path for a file already sitting inside a
