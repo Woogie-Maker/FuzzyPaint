@@ -7,6 +7,17 @@ use std::collections::HashMap;
 
 use crate::segments::Segment;
 
+/// Mirrors `_distance` (`gcode_layer_interval_detour.py`): point-to-point
+/// Euclidean distance. Shared by `planner.rs` and `emit.rs` too.
+pub fn distance(a: (f64, f64), b: (f64, f64)) -> f64 {
+    (b.0 - a.0).hypot(b.1 - a.1)
+}
+
+/// Mirrors `_same_point`.
+pub fn same_point(a: (f64, f64), b: (f64, f64), tolerance: f64) -> bool {
+    distance(a, b) <= tolerance
+}
+
 /// Port of `_arc_points`.
 pub fn arc_points(segment: &Segment, maximum_step: f64) -> Vec<(f64, f64)> {
     let cx = segment.x1 + segment.i;

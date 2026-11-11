@@ -1,3 +1,4 @@
+mod emit;
 mod gcode;
 mod grid;
 mod planner;
@@ -195,6 +196,91 @@ mod fuzzypaint_engine {
             .map(|span| (span.original, span.shifted, span.continue_in, span.continue_out))
             .collect();
         (plan.original, spans)
+    }
+
+    /// Mirrors Python's `f"{value:g}"`.
+    #[pyfunction]
+    fn format_g(value: f64) -> String {
+        crate::emit::format_g(value)
+    }
+
+    /// Port of `_rdp_indices`.
+    #[pyfunction]
+    fn rdp_indices(points: Vec<(f64, f64)>, tolerance: f64) -> Vec<usize> {
+        crate::emit::rdp_indices(&points, tolerance)
+    }
+
+    /// Port of `_emit_plan`, taking a plan directly (not re-derived from
+    /// `plan_segment`) -- `spans` is `[(original, shifted, continue_in, continue_out), ...]`.
+    #[pyfunction]
+    fn emit_plan(
+        segment: SegmentTuple,
+        original: Vec<(f64, f64)>,
+        spans: Vec<(Vec<(f64, f64)>, Vec<(f64, f64)>, bool, bool)>,
+    ) -> Vec<u8> {
+        let segment = segment_from_tuple(segment);
+        let plan = crate::planner::SegmentPlan {
+            original,
+            spans: spans
+                .into_iter()
+                .map(|(original, shifted, continue_in, continue_out)| crate::planner::Span {
+                    original,
+                    shifted,
+                    continue_in,
+                    continue_out,
+                })
+                .collect(),
+        };
+        crate::emit::emit_plan(plan, &segment)
+    }
+
+    /// Runs `plan_segment` once (same scope as `plan_segment_once`) and emits
+    /// the resulting plan to G-code text via `_emit_plan`'s port, in one call
+    /// -- this is the real step-4-into-step-5 pipeline for a single segment.
+    #[pyfunction]
+    #[pyo3(signature = (
+        subject, inner_segments, reference_segments, *,
+        inset_mm=0.24, boundary_resolution_mm=0.10, transition_distance_mm=0.55,
+        endpoint_coverage_mm=0.21, inner_search_mm=1.2, minimum_span_mm=0.10, cell_mm=0.55
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn plan_and_emit_segment(
+        subject: SegmentTuple,
+        inner_segments: Vec<SegmentTuple>,
+        reference_segments: Vec<SegmentTuple>,
+        inset_mm: f64,
+        boundary_resolution_mm: f64,
+        transition_distance_mm: f64,
+        endpoint_coverage_mm: f64,
+        inner_search_mm: f64,
+        minimum_span_mm: f64,
+        cell_mm: f64,
+    ) -> Vec<u8> {
+        let mut subject_segment = segment_from_tuple(subject);
+        let inner_segments: Vec<crate::segments::Segment> =
+            inner_segments.into_iter().map(segment_from_tuple).collect();
+        let reference_segments: Vec<crate::segments::Segment> =
+            reference_segments.into_iter().map(segment_from_tuple).collect();
+        let params = crate::planner::PlanParams {
+            inset_mm,
+            boundary_resolution_mm,
+            transition_distance_mm,
+            endpoint_coverage_mm,
+            inner_search_mm,
+            minimum_span_mm,
+            cell_mm,
+        };
+        let inner_grid = crate::grid::build_grid(&inner_segments, cell_mm);
+        let reference_grid = crate::grid::build_grid(&reference_segments, cell_mm);
+        let plan = crate::planner::plan_segment(
+            &mut subject_segment,
+            &inner_grid,
+            &inner_segments,
+            &reference_grid,
+            &reference_segments,
+            &params,
+        );
+        crate::emit::emit_plan(plan, &subject_segment)
     }
 
     /// Proves the Rust/Python round-trip end-to-end (see memory/

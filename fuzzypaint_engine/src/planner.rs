@@ -12,7 +12,7 @@
 //! directly for differential testing -- see the module doc comment in
 //! `tests/test_rust_parity_planner.py` for how that's handled.
 
-use crate::grid::{aligned, nearby_point, polyline_length, sample_points, GridKey};
+use crate::grid::{aligned, distance, nearby_point, polyline_length, sample_points, GridKey};
 use crate::segments::Segment;
 use std::collections::HashMap;
 
@@ -41,10 +41,6 @@ pub struct Span {
 pub struct SegmentPlan {
     pub original: Vec<(f64, f64)>,
     pub spans: Vec<Span>,
-}
-
-fn distance(a: (f64, f64), b: (f64, f64)) -> f64 {
-    (b.0 - a.0).hypot(b.1 - a.1)
 }
 
 /// Port of the `shift_point` closure.
