@@ -1,6 +1,7 @@
 mod emit;
 mod gcode;
 mod grid;
+mod orchestrate;
 mod planner;
 mod segments;
 mod single_filament;
@@ -281,6 +282,75 @@ mod fuzzypaint_engine {
             &params,
         );
         crate::emit::emit_plan(plan, &subject_segment)
+    }
+
+    /// Full port of `build_interval_detours` (parsing + planning +
+    /// emission for an entire sliced G-code buffer, all three
+    /// `detour_side` modes). Returns `{line_number: replacement_bytes}`,
+    /// exactly matching the Python function's return value -- this is
+    /// the single entry point step 5's finalize_layer/emit_plans
+    /// orchestration was ported for.
+    #[pyfunction]
+    #[pyo3(signature = (
+        gcode, *,
+        inset_mm=0.24, boundary_resolution_mm=0.10, transition_distance_mm=0.55,
+        endpoint_coverage_mm=0.21, inner_search_mm=1.2, minimum_span_mm=0.10,
+        same_layer_gap_mm=0.08, same_layer_endpoint_tolerance_mm=0.65,
+        detour_side="upper".to_string(), target_layers=None, subject_filaments=None,
+        filament_overrides=Vec::new(), cell_mm=0.55
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn build_interval_detours<'py>(
+        py: Python<'py>,
+        gcode: &[u8],
+        inset_mm: f64,
+        boundary_resolution_mm: f64,
+        transition_distance_mm: f64,
+        endpoint_coverage_mm: f64,
+        inner_search_mm: f64,
+        minimum_span_mm: f64,
+        same_layer_gap_mm: f64,
+        same_layer_endpoint_tolerance_mm: f64,
+        detour_side: String,
+        target_layers: Option<std::collections::HashSet<i64>>,
+        subject_filaments: Option<std::collections::HashSet<i64>>,
+        filament_overrides: Vec<(usize, usize, i64)>,
+        cell_mm: f64,
+    ) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+        let side = match detour_side.as_str() {
+            "upper" => crate::orchestrate::DetourSide::Upper,
+            "lower" => crate::orchestrate::DetourSide::Lower,
+            "both" => crate::orchestrate::DetourSide::Both,
+            other => {
+                return Err(super::PyValueError::new_err(format!(
+                    "detour_side must be 'upper', 'lower', or 'both', got {:?}",
+                    other
+                )))
+            }
+        };
+        let layers = crate::segments::parse_wall_segments(gcode, &filament_overrides);
+        let params = crate::orchestrate::OrchestrateParams {
+            plan: crate::planner::PlanParams {
+                inset_mm,
+                boundary_resolution_mm,
+                transition_distance_mm,
+                endpoint_coverage_mm,
+                inner_search_mm,
+                minimum_span_mm,
+                cell_mm,
+            },
+            detour_side: side,
+            target_layers,
+            subject_filaments,
+            same_layer_gap_mm,
+            same_layer_endpoint_tolerance_mm,
+        };
+        let replacements = crate::orchestrate::plan_interval_detours(layers, &params);
+        let result = pyo3::types::PyDict::new(py);
+        for (line_number, bytes) in replacements {
+            result.set_item(line_number, bytes)?;
+        }
+        Ok(result)
     }
 
     /// Proves the Rust/Python round-trip end-to-end (see memory/
