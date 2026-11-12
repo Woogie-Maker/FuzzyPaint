@@ -10,6 +10,18 @@ The version bump happens in the same commit as the change it describes, not as a
 separate afterthought -- that's what let `APP_VERSION` drift and sit at 0.2.6
 through several real changes before this file existed.
 
+## 0.8.2
+
+- Added: GUI checkboxes on the Prepare tab to disable 0.8.0's disconnected-
+  collision check and 0.8.1's non-manifold-edge check independently,
+  default on. On a large/detailed real model (~829,000 triangles), these
+  two checks together added roughly 150 seconds to preparation (confirmed
+  going from ~25s to ~170s on the user's actual file) -- a real cost for
+  routine iteration, not just a one-off for a final export. Both checks
+  were previously only reachable via CLI flags (`--no-protect-overlap`,
+  `--no-protect-nonmanifold`); the people actually hitting this cost use
+  the GUI, not the CLI.
+
 ## 0.8.1
 
 - Added: never apply fuzzy skin to a triangle touching a non-manifold mesh

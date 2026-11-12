@@ -40,7 +40,7 @@ except ImportError:
     fuzzypaint_engine = None
 
 
-APP_VERSION = "0.8.1"
+APP_VERSION = "0.8.2"
 
 OUTPUT_SUBFOLDER_NAME = "FuzzyPaint Output"
 GITHUB_URL = "https://github.com/Woogie-Maker/FuzzyPaint"
@@ -532,6 +532,8 @@ class App(tk.Tk):
         self.project_destination = tk.StringVar()
         self.project_slots = tk.StringVar(value="2")
         self.protect_planar = tk.BooleanVar(value=True)
+        self.protect_overlap = tk.BooleanVar(value=True)
+        self.protect_nonmanifold = tk.BooleanVar(value=True)
         self.disable_wipe = tk.BooleanVar(value=True)
         self.disable_retractions = tk.BooleanVar(value=True)
         self.force_sloped_z_hop = tk.BooleanVar(value=True)
@@ -586,6 +588,32 @@ class App(tk.Tk):
             "Remove embedded guides and downloads from the prepared copy (faster)",
             self.strip_prepare_attachments,
         ).grid(row=7, column=0, columnspan=3, sticky="w", pady=(4, 2))
+        overlap_check = self._labeled_check(
+            form,
+            "Skip fuzzing mesh debris that collides with a disconnected part (slower on large models)",
+            self.protect_overlap,
+        )
+        overlap_check.grid(row=8, column=0, columnspan=3, sticky="w", pady=(4, 2))
+        ToolTip(
+            overlap_check,
+            "Detects stray, never-welded chunks physically overlapping another part of the "
+            "model and never fuzzes them, regardless of paint. On a very large/detailed model "
+            "(e.g. hundreds of thousands of triangles) this can add a couple of minutes to "
+            "preparation. Turn off for quick iteration; turn on for your final output.",
+        )
+        nonmanifold_check = self._labeled_check(
+            form,
+            "Skip fuzzing mesh debris stitched onto a non-manifold edge (slower on large models)",
+            self.protect_nonmanifold,
+        )
+        nonmanifold_check.grid(row=9, column=0, columnspan=3, sticky="w", pady=(4, 2))
+        ToolTip(
+            nonmanifold_check,
+            "Detects triangles touching an edge shared by 3+ triangles (a sign of debris "
+            "welded onto the real surface) and never fuzzes them, regardless of paint. Adds "
+            "some preparation time on very large/detailed models. Turn off for quick "
+            "iteration; turn on for your final output.",
+        )
 
         self._disclosure_toggle(
             tab, "Show advanced settings", self.prepare_advanced, command=self._toggle_prepare_advanced
@@ -811,6 +839,8 @@ class App(tk.Tk):
         return {
             "project_slots": self.project_slots,
             "protect_planar": self.protect_planar,
+            "protect_overlap": self.protect_overlap,
+            "protect_nonmanifold": self.protect_nonmanifold,
             "disable_wipe": self.disable_wipe,
             "disable_retractions": self.disable_retractions,
             "force_sloped_z_hop": self.force_sloped_z_hop,
@@ -1092,6 +1122,8 @@ class App(tk.Tk):
         destination = self._avoid_overwrite(Path(self.project_destination.get()), self.project_destination)
         source = self.project_source.get()
         protect_planar = self.protect_planar.get()
+        protect_overlap = self.protect_overlap.get()
+        protect_nonmanifold = self.protect_nonmanifold.get()
         disable_wipe = self.disable_wipe.get()
         disable_retractions = self.disable_retractions.get()
         force_sloped_z_hop = self.force_sloped_z_hop.get()
@@ -1102,7 +1134,9 @@ class App(tk.Tk):
             report = convert_3mf(
                 source, destination, slots=selected_slots, remove_colour=False,
                 protect_planar=protect_planar, planar_angle_degrees=angle,
-                planar_minimum_area_mm2=area, single_colour=False, fuzzy_settings=fuzzy_settings,
+                planar_minimum_area_mm2=area, protect_overlap=protect_overlap,
+                protect_nonmanifold=protect_nonmanifold,
+                single_colour=False, fuzzy_settings=fuzzy_settings,
                 disable_wipe_while_retracting=disable_wipe,
                 disable_retractions=disable_retractions,
                 force_sloped_z_hop=force_sloped_z_hop,
