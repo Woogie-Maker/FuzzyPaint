@@ -10,6 +10,30 @@ The version bump happens in the same commit as the change it describes, not as a
 separate afterthought -- that's what let `APP_VERSION` drift and sit at 0.2.6
 through several real changes before this file existed.
 
+## 0.8.0
+
+- Added: never apply fuzzy skin to a triangle that's physically colliding
+  with a different, geometrically disconnected piece of the same model,
+  regardless of paint colour. Hand-sculpted/kitbashed terrain models are
+  often exported as many separate stone/rock chunks that were never welded
+  into one watertight mesh; where two chunks end up slightly overlapping
+  or crossing into each other, the result is debris sitting on top of real
+  paintable surface that no amount of paint cleanup can fix, because the
+  slicer may render either layer. Confirmed on a real model: the user
+  found, by splitting the mesh into its disconnected pieces in Blender and
+  dragging them apart by hand, three small rock chunks slightly crossing
+  into a wall that was otherwise correctly protected -- this is exactly
+  the category this change targets. On by default (no new setting to
+  configure); disable with `--no-protect-overlap` on the command line if
+  it's ever not wanted. Two cheaper detection ideas (plain proximity to
+  any nearby triangle; requiring the two surfaces to be near-parallel with
+  overlapping 2D footprints) were tried and rejected after real-model
+  verification showed the first flagged ~98% of all triangles and the
+  second still missed most of a known defect. This does not fix every kind
+  of mesh debris -- a small patch technically welded to the real surface
+  at a few shared vertices is a different, rarer problem that is not
+  addressed here.
+
 ## 0.7.6
 
 - Fixed: "Keep large flat areas smooth" still left small fuzzy spots inside

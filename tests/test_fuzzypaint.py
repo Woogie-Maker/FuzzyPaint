@@ -252,6 +252,80 @@ class XmlConversionTests(unittest.TestCase):
         self.assertEqual(report.planar_patches_protected, 0)
         self.assertEqual(report.planar_triangles_protected, 0)
 
+    def test_overlap_protection_skips_painted_triangle_hit_by_a_colliding_spike(self):
+        # A painted 2mm2 triangle (vertices 0,1,2) and a completely separate,
+        # unpainted "spike" triangle (vertices 3,4,5, sharing no vertex
+        # position with the painted one at all) whose tip sits only 0.1mm
+        # from the painted triangle's centroid -- the real-world shape of a
+        # stray, never-welded mesh chunk colliding with a wall at a single
+        # point, confirmed by the user dragging actual offending chunks away
+        # from a real model in Blender and seeing the collision disappear.
+        xml = b'''<object id="1"><mesh><vertices>
+          <vertex x="0" y="0" z="0"/><vertex x="2" y="0" z="0"/>
+          <vertex x="0" y="2" z="0"/><vertex x="0.667" y="0.667" z="0.1"/>
+          <vertex x="3" y="3" z="5"/><vertex x="3" y="-3" z="5"/>
+        </vertices><triangles>
+          <triangle v1="0" v2="1" v3="2" paint_color="8"/>
+          <triangle v1="3" v2="4" v3="5"/>
+        </triangles></mesh></object>'''
+        report = ConversionReport()
+        converted, changed = convert_model_xml(xml, slots={2}, report=report)
+        self.assertFalse(changed)
+        self.assertNotIn(b"paint_fuzzy_skin", converted)
+        self.assertEqual(report.overlap_triangles_protected, 1)
+        self.assertAlmostEqual(report.overlap_area_protected_mm2, 2.0)
+
+    def test_overlap_protection_ignores_a_distant_unrelated_triangle(self):
+        # Same shapes as above, but the second triangle is far away -- no
+        # collision, so the painted triangle should fuzz normally.
+        xml = b'''<object id="1"><mesh><vertices>
+          <vertex x="0" y="0" z="0"/><vertex x="2" y="0" z="0"/>
+          <vertex x="0" y="2" z="0"/><vertex x="100" y="100" z="100"/>
+          <vertex x="103" y="100" z="100"/><vertex x="100" y="103" z="100"/>
+        </vertices><triangles>
+          <triangle v1="0" v2="1" v3="2" paint_color="8"/>
+          <triangle v1="3" v2="4" v3="5"/>
+        </triangles></mesh></object>'''
+        report = ConversionReport()
+        converted, changed = convert_model_xml(xml, slots={2}, report=report)
+        self.assertTrue(changed)
+        self.assertIn(b"paint_fuzzy_skin", converted)
+        self.assertEqual(report.overlap_triangles_protected, 0)
+
+    def test_overlap_protection_leaves_an_ordinary_shared_edge_alone(self):
+        # Two triangles sharing a real mesh edge (the same connected piece,
+        # like any ordinary flat patch) touch at that edge by definition --
+        # that must never be treated as a collision, however close.
+        xml = b'''<object id="1"><mesh><vertices>
+          <vertex x="0" y="0" z="0"/><vertex x="10" y="0" z="0"/>
+          <vertex x="10" y="10" z="0"/><vertex x="0" y="10" z="0"/>
+        </vertices><triangles>
+          <triangle v1="0" v2="1" v3="2" paint_color="8"/>
+          <triangle v1="0" v2="2" v3="3" paint_color="8"/>
+        </triangles></mesh></object>'''
+        report = ConversionReport()
+        converted, changed = convert_model_xml(xml, slots={2}, report=report)
+        self.assertTrue(changed)
+        self.assertIn(b"paint_fuzzy_skin", converted)
+        self.assertEqual(report.overlap_triangles_protected, 0)
+
+    def test_overlap_protection_can_be_disabled(self):
+        xml = b'''<object id="1"><mesh><vertices>
+          <vertex x="0" y="0" z="0"/><vertex x="2" y="0" z="0"/>
+          <vertex x="0" y="2" z="0"/><vertex x="0.667" y="0.667" z="0.1"/>
+          <vertex x="3" y="3" z="5"/><vertex x="3" y="-3" z="5"/>
+        </vertices><triangles>
+          <triangle v1="0" v2="1" v3="2" paint_color="8"/>
+          <triangle v1="3" v2="4" v3="5"/>
+        </triangles></mesh></object>'''
+        report = ConversionReport()
+        converted, changed = convert_model_xml(
+            xml, slots={2}, protect_overlap=False, report=report
+        )
+        self.assertTrue(changed)
+        self.assertIn(b"paint_fuzzy_skin", converted)
+        self.assertEqual(report.overlap_triangles_protected, 0)
+
 
 class ArchiveTests(unittest.TestCase):
     def test_step_one_explains_when_a_sliced_file_was_selected(self):

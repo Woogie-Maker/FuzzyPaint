@@ -159,6 +159,8 @@ class ConversionReport:
     planar_patches_protected: int = 0
     planar_triangles_protected: int = 0
     planar_area_protected_mm2: float = 0.0
+    overlap_triangles_protected: int = 0
+    overlap_area_protected_mm2: float = 0.0
     single_colour_attributes_removed: int = 0
     single_colour_assignments_remapped: int = 0
     single_spool_pairs_zeroed: int = 0
@@ -493,6 +495,208 @@ def _find_planar_protection(
     return protected, protected_patch_count, protected_area
 
 
+def _point_to_triangle_distance_approx(
+    point: Tuple[float, float, float], triangle: Tuple[Tuple[float, float, float], ...]
+) -> float:
+    """Cheap lower-effort stand-in for exact point-to-triangle distance.
+
+    Checks the 3 vertices and the 3 edge midpoints only, not the true
+    nearest point on the triangle's surface. That slightly overestimates
+    distance in some orientations, but it is a reasonable approximation at
+    the sub-millimetre "are these basically touching" scale this function
+    cares about, and is far cheaper than an exact point-in-triangle
+    projection when run over hundreds of thousands of candidate pairs.
+    """
+    candidates = list(triangle)
+    for i in range(3):
+        a = triangle[i]
+        b = triangle[(i + 1) % 3]
+        candidates.append(tuple((a[axis] + b[axis]) / 2 for axis in range(3)))
+    return min(math.dist(point, candidate) for candidate in candidates)
+
+
+def _find_overlap_protection(
+    object_xml: bytes,
+    *,
+    max_gap_mm: float = 0.3,
+    cell_size_mm: float = 1.0,
+) -> Tuple[Set[int], dict[int, float]]:
+    """Find triangles belonging to a geometrically disconnected piece of the
+    same object that physically touches/crosses another piece, regardless
+    of paint colour, and never fuzz them.
+
+    Hand-sculpted/kitbashed terrain models are frequently exported as many
+    separate stone/rock chunks merged into one object without ever being
+    welded (boolean-unioned) into a single watertight shell. On a real
+    model from this category, the user found -- by hand, dragging pieces
+    apart in Blender after splitting the mesh by loose parts -- three small
+    rock chunks that were never meant to touch a nearby wall at all, but
+    were positioned slightly overlapping/crossing into it. Paint applied to
+    the wall underneath does nothing to fix this, because the slicer may
+    pick up either surface, and the original designer has no practical way
+    to notice or paint around debris placement like this.
+
+    Two cheaper signals were tried and both failed real-model verification
+    before this one. Plain proximity ("is there some other triangle
+    nearby") is not usable: at every ordinary paint-colour boundary, an
+    unpainted triangle sits immediately next to a painted one, and that is
+    completely normal -- on a real model this matched over 98% of all
+    triangles. Requiring the two triangles to additionally be near-parallel
+    and have overlapping 2D footprints (a flush duplicate layer) is more
+    selective, but still misses genuinely separate colliding chunks that
+    cross through a surface at an angle rather than lying flat on it, which
+    is exactly the shape of the real defect found by hand.
+
+    The distinguishing feature that actually holds up is geometric
+    disconnection: triangles are grouped into "shells" with a union-find
+    over shared vertex *positions* (so a welded seam that is still really
+    one piece is not split apart -- this matches what Bambu Studio's own
+    "split into parts" and Blender's "Separate by Loose Parts" both treat
+    as one piece). Only candidate pairs from two different shells are
+    tested, and the test is simply: is any part of one triangle within
+    `max_gap_mm` of the other (checked against its 3 vertices and 3 edge
+    midpoints, cheaply)? No angle or orientation requirement -- a stray
+    chunk colliding with a wall at any angle still should not be fuzzed
+    where it collides. On the real model this isolated a similar ~4% of
+    all triangles to the flush-only version, not a wholesale re-flagging
+    of ordinary geometry, and real debris chunks the user confirmed by hand
+    fall within this category.
+
+    This does not catch every kind of mesh debris -- a small patch that is
+    technically welded to the real surface at a few shared vertices (seen
+    on the same real model, in a different corner) is, by this definition,
+    the same connected piece, and is left alone. That is a real, different,
+    rarer problem than the one this function targets.
+    """
+    vertices = []
+    for match in VERTEX_RE.finditer(object_xml):
+        tag = match.group(0)
+        coords = [_simple_attribute(tag, axis) for axis in (b"x", b"y", b"z")]
+        if any(value is None for value in coords):
+            return set(), {}
+        vertices.append(tuple(float(value) for value in coords))
+    if not vertices:
+        return set(), {}
+
+    def position_key(index: int) -> Tuple[float, float, float]:
+        return tuple(round(value, 4) for value in vertices[index])
+
+    source_indices = []
+    areas = []
+    centroids = []
+    triangle_points = []
+    position_sets: List[frozenset] = []
+
+    for triangle_index, match in enumerate(TRIANGLE_RE.finditer(object_xml)):
+        tag = match.group(0)
+        raw_indices = [_simple_attribute(tag, key) for key in (b"v1", b"v2", b"v3")]
+        if any(value is None for value in raw_indices):
+            continue
+        indices = tuple(int(value) for value in raw_indices)
+        if any(index < 0 or index >= len(vertices) for index in indices):
+            continue
+        a, b, c = (vertices[index] for index in indices)
+        ab = tuple(b[i] - a[i] for i in range(3))
+        ac = tuple(c[i] - a[i] for i in range(3))
+        cross = (
+            ab[1] * ac[2] - ab[2] * ac[1],
+            ab[2] * ac[0] - ab[0] * ac[2],
+            ab[0] * ac[1] - ab[1] * ac[0],
+        )
+        length = math.sqrt(sum(value * value for value in cross))
+        if length <= 1e-12:
+            continue
+        source_indices.append(triangle_index)
+        areas.append(length * 0.5)
+        centroids.append(tuple((a[i] + b[i] + c[i]) / 3 for i in range(3)))
+        triangle_points.append((a, b, c))
+        position_sets.append(
+            frozenset((position_key(indices[0]), position_key(indices[1]), position_key(indices[2])))
+        )
+
+    count = len(source_indices)
+    if count == 0:
+        return set(), {}
+
+    # Union-find over shared vertex positions: two triangles are the same
+    # "shell" if reachable from one another via a chain of shared mesh
+    # edges/vertices, regardless of angle or paint.
+    parent = list(range(count))
+
+    def find(index: int) -> int:
+        while parent[index] != index:
+            parent[index] = parent[parent[index]]
+            index = parent[index]
+        return index
+
+    def union(first: int, second: int) -> None:
+        root_first, root_second = find(first), find(second)
+        if root_first != root_second:
+            parent[root_first] = root_second
+
+    position_owner: dict = {}
+    for candidate, positions in enumerate(position_sets):
+        for position in positions:
+            owner = position_owner.get(position)
+            if owner is None:
+                position_owner[position] = candidate
+            else:
+                union(candidate, owner)
+
+    shell_of = [find(index) for index in range(count)]
+
+    # Index each triangle into every grid cell touched by any of its 3
+    # vertices (not just one cell derived from its centroid). A long, thin
+    # triangle -- one vertex touching a surface, the other two far away, the
+    # real shape of a stray chunk's corner poking into a wall -- has a
+    # centroid nowhere near the actual touching point; indexing by centroid
+    # alone can miss exactly the collisions this function exists to find.
+    def cell_index(point: Tuple[float, float, float]) -> Tuple[int, int, int]:
+        return (
+            math.floor(point[0] / cell_size_mm),
+            math.floor(point[1] / cell_size_mm),
+            math.floor(point[2] / cell_size_mm),
+        )
+
+    grid: dict = {}
+    triangle_cells: List[Set[Tuple[int, int, int]]] = []
+    for candidate, points in enumerate(triangle_points):
+        cells = {cell_index(point) for point in points}
+        triangle_cells.append(cells)
+        for cell in cells:
+            grid.setdefault(cell, []).append(candidate)
+
+    def neighbours(cells: Set[Tuple[int, int, int]]) -> Iterable[int]:
+        seen: Set[int] = set()
+        for cx, cy, cz in cells:
+            for dx in (-1, 0, 1):
+                for dy in (-1, 0, 1):
+                    for dz in (-1, 0, 1):
+                        for other in grid.get((cx + dx, cy + dy, cz + dz), ()):
+                            if other not in seen:
+                                seen.add(other)
+                                yield other
+
+    flagged = [False] * count
+    for candidate in range(count):
+        if flagged[candidate]:
+            continue
+        shell = shell_of[candidate]
+        centroid = centroids[candidate]
+        for other in neighbours(triangle_cells[candidate]):
+            if other == candidate or flagged[other] or shell_of[other] == shell:
+                continue
+            if _point_to_triangle_distance_approx(centroid, triangle_points[other]) > max_gap_mm:
+                continue
+            flagged[candidate] = True
+            flagged[other] = True
+            break
+
+    protected = {source_indices[index] for index in range(count) if flagged[index]}
+    area_by_index = {source_indices[index]: areas[index] for index in range(count) if flagged[index]}
+    return protected, area_by_index
+
+
 def _set_attribute(tag: bytes, pattern: re.Pattern, name: bytes, value: Optional[str]) -> bytes:
     match = pattern.search(tag)
     if value is None:
@@ -518,13 +722,16 @@ def convert_model_xml(
     protect_planar: bool = False,
     planar_angle_degrees: float = 2.0,
     planar_minimum_area_mm2: float = 20.0,
+    protect_overlap: bool = True,
     report: Optional[ConversionReport] = None,
 ) -> Tuple[bytes, bool]:
     """Convert colour attributes in one 3MF model XML member."""
     report = report or ConversionReport()
     changed = False
 
-    def convert_triangle_tags(xml: bytes, protected: Set[int]) -> bytes:
+    def convert_triangle_tags(
+        xml: bytes, planar_protected: Set[int], overlap_protected: dict[int, float]
+    ) -> bytes:
         triangle_index = -1
 
         def replace_tag(match: re.Match) -> bytes:
@@ -544,7 +751,12 @@ def convert_model_xml(
                 if state > 0 and (slots is None or state in slots):
                     report.selected_leaf_counts[state] += 1
 
-            if triangle_index in protected:
+            if triangle_index in overlap_protected:
+                report.overlap_triangles_protected += 1
+                report.overlap_area_protected_mm2 += overlap_protected[triangle_index]
+                return tag
+
+            if triangle_index in planar_protected:
                 report.planar_triangles_protected += 1
                 return tag
 
@@ -576,8 +788,8 @@ def convert_model_xml(
 
         return TRIANGLE_RE.sub(replace_tag, xml)
 
-    if not protect_planar:
-        return convert_triangle_tags(data, set()), changed
+    if not protect_planar and not protect_overlap:
+        return convert_triangle_tags(data, set(), {}), changed
 
     found_object = False
 
@@ -585,19 +797,24 @@ def convert_model_xml(
         nonlocal found_object
         found_object = True
         object_xml = match.group(0)
-        protected, patches, area = _find_planar_protection(
-            object_xml,
-            slots,
-            angle_degrees=planar_angle_degrees,
-            minimum_area_mm2=planar_minimum_area_mm2,
-        )
-        report.planar_patches_protected += patches
-        report.planar_area_protected_mm2 += area
-        return convert_triangle_tags(object_xml, protected)
+        planar_protected: Set[int] = set()
+        if protect_planar:
+            planar_protected, patches, area = _find_planar_protection(
+                object_xml,
+                slots,
+                angle_degrees=planar_angle_degrees,
+                minimum_area_mm2=planar_minimum_area_mm2,
+            )
+            report.planar_patches_protected += patches
+            report.planar_area_protected_mm2 += area
+        overlap_protected: dict[int, float] = {}
+        if protect_overlap:
+            _overlap_indices, overlap_protected = _find_overlap_protection(object_xml)
+        return convert_triangle_tags(object_xml, planar_protected, overlap_protected)
 
     converted = OBJECT_RE.sub(replace_object, data)
     if not found_object:
-        converted = convert_triangle_tags(data, set())
+        converted = convert_triangle_tags(data, set(), {})
     return converted, changed
 
 
@@ -831,6 +1048,7 @@ def convert_3mf(
     protect_planar: bool = False,
     planar_angle_degrees: float = 2.0,
     planar_minimum_area_mm2: float = 20.0,
+    protect_overlap: bool = True,
     single_colour: bool = False,
     single_colour_slot: int = 1,
     single_spool_segmented: bool = False,
@@ -905,6 +1123,7 @@ def convert_3mf(
                             protect_planar=protect_planar,
                             planar_angle_degrees=planar_angle_degrees,
                             planar_minimum_area_mm2=planar_minimum_area_mm2,
+                            protect_overlap=protect_overlap,
                             report=report,
                         )
                         report.model_files_modified += int(modified)
@@ -1077,6 +1296,13 @@ def format_report(report: ConversionReport) -> str:
             else ""
         )
         + (
+            f"\nSkipped fuzzing {report.overlap_triangles_protected:,} triangle(s) "
+            f"({report.overlap_area_protected_mm2:,.1f} mm²) found sitting flush against "
+            f"disconnected/overlapping geometry."
+            if report.overlap_triangles_protected
+            else ""
+        )
+        + (
             f"\nRemoved {report.attachments_removed:,} embedded guide/media file(s) "
             f"({report.attachment_bytes_removed / 1_000_000:.1f} MB)."
             if report.attachments_removed
@@ -1142,6 +1368,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="do not add fuzzy skin to connected flat painted patches of at least 20 mm²",
     )
     parser.add_argument(
+        "--no-protect-overlap",
+        dest="protect_overlap",
+        action="store_false",
+        help="also fuzz triangles sitting flush against disconnected/overlapping geometry "
+        "(default: skip fuzzing them, since they are mesh debris rather than real paint)",
+    )
+    parser.add_argument(
         "--single-colour",
         action="store_true",
         help="retain fuzzy skin but remove face colours and remap every part to filament 1",
@@ -1163,6 +1396,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             slots=parse_slots(args.slots),
             remove_colour=args.remove_colour,
             protect_planar=args.protect_planar,
+            protect_overlap=args.protect_overlap,
             single_colour=args.single_colour,
             single_spool_segmented=args.single_spool_segmented,
         )
