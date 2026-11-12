@@ -10,6 +10,28 @@ The version bump happens in the same commit as the change it describes, not as a
 separate afterthought -- that's what let `APP_VERSION` drift and sit at 0.2.6
 through several real changes before this file existed.
 
+## 0.8.1
+
+- Added: never apply fuzzy skin to a triangle touching a non-manifold mesh
+  edge (an edge shared by 3 or more triangles, instead of the normal 1 or
+  2), regardless of paint colour. A different real defect from 0.8.0's
+  disconnected-piece check: a small patch of degenerate geometry can be
+  genuinely welded to the real surface at a few shared vertices -- found
+  on the same real model, in a corner where a colliding chunk (since
+  dragged away by the user, the fix for 0.8.0) left behind a scarred
+  ridge stitched into the wall itself. Because it shares real vertices
+  with the wall, it's the same connected piece by any disconnection test,
+  so 0.8.0's check correctly leaves it alone; checking for non-manifold
+  edges is a different, well-established mesh-validity signal that
+  catches this instead. On by default; disable with
+  `--no-protect-nonmanifold` if it's ever not wanted. Verified bounded on
+  the same real model (5.6% of all triangles, not a wholesale
+  re-flagging); could not be directly verified against the specific
+  hand-found cluster from 0.8.0's own verification, because extracting
+  that cluster through a Blender round-trip welded together the exact
+  duplicated vertex positions this check depends on, destroying the
+  signal in that one sample.
+
 ## 0.8.0
 
 - Added: never apply fuzzy skin to a triangle that's physically colliding

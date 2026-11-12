@@ -161,6 +161,8 @@ class ConversionReport:
     planar_area_protected_mm2: float = 0.0
     overlap_triangles_protected: int = 0
     overlap_area_protected_mm2: float = 0.0
+    nonmanifold_triangles_protected: int = 0
+    nonmanifold_area_protected_mm2: float = 0.0
     single_colour_attributes_removed: int = 0
     single_colour_assignments_remapped: int = 0
     single_spool_pairs_zeroed: int = 0
@@ -697,6 +699,103 @@ def _find_overlap_protection(
     return protected, area_by_index
 
 
+def _find_nonmanifold_protection(object_xml: bytes) -> Tuple[Set[int], dict[int, float]]:
+    """Find triangles touching a non-manifold edge and never fuzz them.
+
+    A different real defect from the one `_find_overlap_protection` targets:
+    a small patch of degenerate geometry that is genuinely welded to the
+    real surface at a few shared vertices (confirmed on the same real
+    model, in a corner where a colliding chunk -- since moved away by the
+    user -- left behind a scarred ridge stitched into the wall itself).
+    Because it shares real vertices with the wall, it is the same connected
+    "shell" as the wall by any shell/disconnection test, so
+    `_find_overlap_protection`'s disconnected-piece check correctly leaves
+    it alone; a different signal is needed.
+
+    On a proper single surface, every edge is shared by exactly two
+    triangles (or one, at an open/boundary edge -- both are completely
+    normal and not a defect). An edge shared by three or more triangles
+    means something extra was stitched on right there: exactly the
+    fingerprint of a scarred-in remnant like the one found by hand, and a
+    well-established mesh-validity check in its own right, independent of
+    any proximity or angle heuristic. Any triangle touching such an edge is
+    protected, on the same reasoning used elsewhere in this file: a human
+    looking at a small anomaly stitched onto an otherwise flat, already
+    fuzzy-painted area reads the whole thing as "that flat area, with a
+    rough spot," not as a separate feature worth keeping fuzzy on its own.
+
+    On the one real model this was checked against, this isolated 5.6% of
+    all triangles -- a plausible, bounded amount, not a wholesale
+    re-flagging of ordinary geometry. It could not be directly verified
+    against the specific hand-found defect cluster from earlier in the same
+    session, because round-tripping that cluster through Blender to extract
+    it welded together exactly the duplicated vertex positions this check
+    depends on, destroying the signal in that one sample -- a limitation of
+    the verification method available at the time, not a claim that this
+    check is proven against that specific cluster.
+    """
+    vertices = []
+    for match in VERTEX_RE.finditer(object_xml):
+        tag = match.group(0)
+        coords = [_simple_attribute(tag, axis) for axis in (b"x", b"y", b"z")]
+        if any(value is None for value in coords):
+            return set(), {}
+        vertices.append(tuple(float(value) for value in coords))
+    if not vertices:
+        return set(), {}
+
+    def position_key(index: int) -> Tuple[float, float, float]:
+        return tuple(round(value, 4) for value in vertices[index])
+
+    source_indices = []
+    areas = []
+    edge_lists: List[Tuple[Tuple, Tuple, Tuple]] = []
+
+    for triangle_index, match in enumerate(TRIANGLE_RE.finditer(object_xml)):
+        tag = match.group(0)
+        raw_indices = [_simple_attribute(tag, key) for key in (b"v1", b"v2", b"v3")]
+        if any(value is None for value in raw_indices):
+            continue
+        indices = tuple(int(value) for value in raw_indices)
+        if any(index < 0 or index >= len(vertices) for index in indices):
+            continue
+        a, b, c = (vertices[index] for index in indices)
+        ab = tuple(b[i] - a[i] for i in range(3))
+        ac = tuple(c[i] - a[i] for i in range(3))
+        cross = (
+            ab[1] * ac[2] - ab[2] * ac[1],
+            ab[2] * ac[0] - ab[0] * ac[2],
+            ab[0] * ac[1] - ab[1] * ac[0],
+        )
+        length = math.sqrt(sum(value * value for value in cross))
+        if length <= 1e-12:
+            continue
+        pa, pb, pc = position_key(indices[0]), position_key(indices[1]), position_key(indices[2])
+        source_indices.append(triangle_index)
+        areas.append(length * 0.5)
+        edge_lists.append(
+            (tuple(sorted((pa, pb))), tuple(sorted((pb, pc))), tuple(sorted((pc, pa))))
+        )
+
+    edge_counts: dict = {}
+    for edges in edge_lists:
+        for edge in edges:
+            edge_counts[edge] = edge_counts.get(edge, 0) + 1
+
+    nonmanifold_edges = {edge for edge, count in edge_counts.items() if count >= 3}
+    if not nonmanifold_edges:
+        return set(), {}
+
+    protected = set()
+    area_by_index: dict = {}
+    for index, edges in enumerate(edge_lists):
+        if any(edge in nonmanifold_edges for edge in edges):
+            protected.add(source_indices[index])
+            area_by_index[source_indices[index]] = areas[index]
+
+    return protected, area_by_index
+
+
 def _set_attribute(tag: bytes, pattern: re.Pattern, name: bytes, value: Optional[str]) -> bytes:
     match = pattern.search(tag)
     if value is None:
@@ -723,6 +822,7 @@ def convert_model_xml(
     planar_angle_degrees: float = 2.0,
     planar_minimum_area_mm2: float = 20.0,
     protect_overlap: bool = True,
+    protect_nonmanifold: bool = True,
     report: Optional[ConversionReport] = None,
 ) -> Tuple[bytes, bool]:
     """Convert colour attributes in one 3MF model XML member."""
@@ -730,7 +830,10 @@ def convert_model_xml(
     changed = False
 
     def convert_triangle_tags(
-        xml: bytes, planar_protected: Set[int], overlap_protected: dict[int, float]
+        xml: bytes,
+        planar_protected: Set[int],
+        overlap_protected: dict[int, float],
+        nonmanifold_protected: dict[int, float],
     ) -> bytes:
         triangle_index = -1
 
@@ -754,6 +857,11 @@ def convert_model_xml(
             if triangle_index in overlap_protected:
                 report.overlap_triangles_protected += 1
                 report.overlap_area_protected_mm2 += overlap_protected[triangle_index]
+                return tag
+
+            if triangle_index in nonmanifold_protected:
+                report.nonmanifold_triangles_protected += 1
+                report.nonmanifold_area_protected_mm2 += nonmanifold_protected[triangle_index]
                 return tag
 
             if triangle_index in planar_protected:
@@ -788,8 +896,8 @@ def convert_model_xml(
 
         return TRIANGLE_RE.sub(replace_tag, xml)
 
-    if not protect_planar and not protect_overlap:
-        return convert_triangle_tags(data, set(), {}), changed
+    if not protect_planar and not protect_overlap and not protect_nonmanifold:
+        return convert_triangle_tags(data, set(), {}, {}), changed
 
     found_object = False
 
@@ -810,11 +918,16 @@ def convert_model_xml(
         overlap_protected: dict[int, float] = {}
         if protect_overlap:
             _overlap_indices, overlap_protected = _find_overlap_protection(object_xml)
-        return convert_triangle_tags(object_xml, planar_protected, overlap_protected)
+        nonmanifold_protected: dict[int, float] = {}
+        if protect_nonmanifold:
+            _nonmanifold_indices, nonmanifold_protected = _find_nonmanifold_protection(object_xml)
+        return convert_triangle_tags(
+            object_xml, planar_protected, overlap_protected, nonmanifold_protected
+        )
 
     converted = OBJECT_RE.sub(replace_object, data)
     if not found_object:
-        converted = convert_triangle_tags(data, set(), {})
+        converted = convert_triangle_tags(data, set(), {}, {})
     return converted, changed
 
 
@@ -1049,6 +1162,7 @@ def convert_3mf(
     planar_angle_degrees: float = 2.0,
     planar_minimum_area_mm2: float = 20.0,
     protect_overlap: bool = True,
+    protect_nonmanifold: bool = True,
     single_colour: bool = False,
     single_colour_slot: int = 1,
     single_spool_segmented: bool = False,
@@ -1124,6 +1238,7 @@ def convert_3mf(
                             planar_angle_degrees=planar_angle_degrees,
                             planar_minimum_area_mm2=planar_minimum_area_mm2,
                             protect_overlap=protect_overlap,
+                            protect_nonmanifold=protect_nonmanifold,
                             report=report,
                         )
                         report.model_files_modified += int(modified)
@@ -1303,6 +1418,13 @@ def format_report(report: ConversionReport) -> str:
             else ""
         )
         + (
+            f"\nSkipped fuzzing {report.nonmanifold_triangles_protected:,} triangle(s) "
+            f"({report.nonmanifold_area_protected_mm2:,.1f} mm²) found touching a "
+            f"non-manifold mesh edge."
+            if report.nonmanifold_triangles_protected
+            else ""
+        )
+        + (
             f"\nRemoved {report.attachments_removed:,} embedded guide/media file(s) "
             f"({report.attachment_bytes_removed / 1_000_000:.1f} MB)."
             if report.attachments_removed
@@ -1375,6 +1497,13 @@ def build_parser() -> argparse.ArgumentParser:
         "(default: skip fuzzing them, since they are mesh debris rather than real paint)",
     )
     parser.add_argument(
+        "--no-protect-nonmanifold",
+        dest="protect_nonmanifold",
+        action="store_false",
+        help="also fuzz triangles touching a non-manifold mesh edge "
+        "(default: skip fuzzing them, since they are mesh debris rather than real paint)",
+    )
+    parser.add_argument(
         "--single-colour",
         action="store_true",
         help="retain fuzzy skin but remove face colours and remap every part to filament 1",
@@ -1397,6 +1526,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             remove_colour=args.remove_colour,
             protect_planar=args.protect_planar,
             protect_overlap=args.protect_overlap,
+            protect_nonmanifold=args.protect_nonmanifold,
             single_colour=args.single_colour,
             single_spool_segmented=args.single_spool_segmented,
         )

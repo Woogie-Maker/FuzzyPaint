@@ -326,6 +326,63 @@ class XmlConversionTests(unittest.TestCase):
         self.assertIn(b"paint_fuzzy_skin", converted)
         self.assertEqual(report.overlap_triangles_protected, 0)
 
+    def test_nonmanifold_protection_skips_a_painted_triangle_on_a_shared_edge(self):
+        # Three triangles (A painted, B and C unpainted) all share the same
+        # edge (v0-v1) -- a real edge should only ever be shared by two
+        # triangles (or one, at an open boundary); a third triangle on it
+        # means something extra was stitched on right there, the real
+        # signature of a scarred-in remnant left behind by a since-removed
+        # colliding chunk.
+        xml = b'''<object id="1"><mesh><vertices>
+          <vertex x="0" y="0" z="0"/><vertex x="1" y="0" z="0"/>
+          <vertex x="0" y="1" z="0"/><vertex x="0" y="-1" z="0"/>
+          <vertex x="0" y="0" z="1"/>
+        </vertices><triangles>
+          <triangle v1="0" v2="1" v3="2" paint_color="8"/>
+          <triangle v1="0" v2="1" v3="3"/>
+          <triangle v1="0" v2="1" v3="4"/>
+        </triangles></mesh></object>'''
+        report = ConversionReport()
+        converted, changed = convert_model_xml(xml, slots={2}, report=report)
+        self.assertFalse(changed)
+        self.assertNotIn(b"paint_fuzzy_skin", converted)
+        self.assertEqual(report.nonmanifold_triangles_protected, 1)
+        self.assertAlmostEqual(report.nonmanifold_area_protected_mm2, 0.5)
+
+    def test_nonmanifold_protection_leaves_an_ordinary_shared_edge_alone(self):
+        # A normal edge shared by exactly two triangles (any ordinary flat
+        # patch) is not a defect and must fuzz normally.
+        xml = b'''<object id="1"><mesh><vertices>
+          <vertex x="0" y="0" z="0"/><vertex x="10" y="0" z="0"/>
+          <vertex x="10" y="10" z="0"/><vertex x="0" y="10" z="0"/>
+        </vertices><triangles>
+          <triangle v1="0" v2="1" v3="2" paint_color="8"/>
+          <triangle v1="0" v2="2" v3="3" paint_color="8"/>
+        </triangles></mesh></object>'''
+        report = ConversionReport()
+        converted, changed = convert_model_xml(xml, slots={2}, report=report)
+        self.assertTrue(changed)
+        self.assertIn(b"paint_fuzzy_skin", converted)
+        self.assertEqual(report.nonmanifold_triangles_protected, 0)
+
+    def test_nonmanifold_protection_can_be_disabled(self):
+        xml = b'''<object id="1"><mesh><vertices>
+          <vertex x="0" y="0" z="0"/><vertex x="1" y="0" z="0"/>
+          <vertex x="0" y="1" z="0"/><vertex x="0" y="-1" z="0"/>
+          <vertex x="0" y="0" z="1"/>
+        </vertices><triangles>
+          <triangle v1="0" v2="1" v3="2" paint_color="8"/>
+          <triangle v1="0" v2="1" v3="3"/>
+          <triangle v1="0" v2="1" v3="4"/>
+        </triangles></mesh></object>'''
+        report = ConversionReport()
+        converted, changed = convert_model_xml(
+            xml, slots={2}, protect_nonmanifold=False, report=report
+        )
+        self.assertTrue(changed)
+        self.assertIn(b"paint_fuzzy_skin", converted)
+        self.assertEqual(report.nonmanifold_triangles_protected, 0)
+
 
 class ArchiveTests(unittest.TestCase):
     def test_step_one_explains_when_a_sliced_file_was_selected(self):
