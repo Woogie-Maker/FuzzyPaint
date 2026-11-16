@@ -62,7 +62,9 @@ Step 1 always retains the temporary colour painting required to build precise
 outline detours after slicing. Step 2 removes the resulting filament changes,
 purging and prime tower and produces the final single-filament print file.
 
-Requires Python 3.10 or newer. The tool uses only Python's standard library.
+The 0.12.x source launcher and Windows package target Python 3.15.2. The Python
+application uses only the standard library; release builds bundle the PyO3
+0.30.1 Rust engine used by both preparation and G-code processing.
 
 ## Command line
 
@@ -101,11 +103,10 @@ Bambu Studio Preview before printing; do not use it on an unsliced project 3MF.
   no more than 2°, and withholds fuzzy skin from connected patches measuring at
   least 20 mm². It is optional because some designs may genuinely want fuzzy
   skin on a large flat face.
-- Preparation and outline analysis are CPU operations. The current converter
-  avoids rewriting non-print attachments and caches repeated wall geometry,
-  but the detailed cross-layer outline pass is still single-process Python.
-  A future layer-boundary multiprocessing implementation is the appropriate
-  route to using multiple CPU cores; GPU acceleration is not currently used.
+- Preparation and outline analysis are CPU operations. Release builds use the
+  bundled Rust engine for the normal mesh-protection and G-code workflows,
+  while retaining Python compatibility fallbacks. Bambu Studio slicing remains
+  a separate external operation; GPU acceleration is not currently used.
 - Apart from the explicitly selected options, the converter retains the
   existing project and print-profile data. With the default retraction option
   enabled, process and per-filament retraction lengths are set to zero before
@@ -120,5 +121,5 @@ Bambu Studio Preview before printing; do not use it on an unsliced project 3MF.
 ## Tests
 
 ```powershell
-python -m unittest discover -s tests -v
+& "$env:LOCALAPPDATA\Programs\Python\Python315\python.exe" -m unittest discover -s tests -v
 ```

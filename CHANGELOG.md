@@ -10,6 +10,16 @@ The version bump happens in the same commit as the change it describes, not as a
 separate afterthought -- that's what let `APP_VERSION` drift and sit at 0.2.6
 through several real changes before this file existed.
 
+## 0.12.0
+
+- Migrated the Windows application and bundled Rust extension to Python 3.15.2
+  and PyO3 0.30.1 without changing conversion defaults or output behaviour.
+- Reused an existing Explorer window when it already shows the exact output
+  folder. Matching uses canonical, case-insensitive filesystem paths; parent,
+  child, and similarly named folders do not count as matches.
+- Restored and focused the matching Explorer window when found, and opened a
+  new window only when no exact match exists.
+
 ## 0.11.2
 
 - Moved the normal smooth-surface preparation geometry into the bundled Rust

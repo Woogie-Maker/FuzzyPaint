@@ -21,7 +21,7 @@ mod fuzzypaint_engine {
     /// `gcode_layer_detour.Segment`'s dataclass -- only the raw constructor
     /// fields, not its `__post_init__`-derived ones, which aren't needed
     /// until step 3's grid/neighbor-search port).
-    #[pyclass(skip_from_py_object)]
+    #[pyclass]
     #[derive(Clone)]
     struct PySegment {
         #[pyo3(get)]

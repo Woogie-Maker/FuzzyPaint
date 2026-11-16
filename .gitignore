@@ -2,9 +2,11 @@
 __pycache__/
 *.pyc
 .venv-build/
+.venv-build-*/
 build/
 dist/
 *.spec
+!FuzzyPaint-0.12.0.spec
 
 # Per-run output folder created next to whichever file the user converts
 FuzzyPaint Output/

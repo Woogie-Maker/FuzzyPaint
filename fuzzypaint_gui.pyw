@@ -33,6 +33,7 @@ from fuzzypaint import (
 from gcode_layer_interval_detour import build_interval_detours
 from gcode_single_filament import CollapseReport, collapse_gcode_3mf
 from bambu_cli import archive_has_gcode, slice_project
+from explorer_reuse import reveal_in_explorer
 
 try:
     import fuzzypaint_engine
@@ -47,7 +48,7 @@ else:
         fuzzypaint_engine = None
 
 
-APP_VERSION = "0.11.2"
+APP_VERSION = "0.12.0"
 SETTINGS_SCHEMA_VERSION = 2
 
 OUTPUT_SUBFOLDER_NAME = "FuzzyPaint Output"
@@ -68,28 +69,6 @@ def suggested_output_path(source: Path, filename: str) -> Path:
     if source.parent.name == OUTPUT_SUBFOLDER_NAME:
         return source.parent / filename
     return source.parent / OUTPUT_SUBFOLDER_NAME / filename
-
-
-def reveal_in_explorer(path: Path) -> None:
-    """Open the file's folder in Explorer, or focus an already-open window.
-
-    Explorer itself de-duplicates: calling this when that folder is already
-    open just brings the existing window forward rather than opening a
-    second one.
-
-    This used to pass `/select,<path>` to highlight the file itself rather
-    than just opening its folder. A double-quoting bug in that was found
-    and fixed, but even with correct quoting confirmed (checked the exact
-    command line via `subprocess.list2cmdline`, live-tested against the
-    real file), `/select,` still silently opened Documents on this machine
-    for reasons that aren't about our quoting. Opening the plain folder,
-    confirmed working live, gets the user to the right place without
-    relying on that flag at all.
-    """
-    try:
-        subprocess.Popen(["explorer", str(path.parent)])
-    except OSError:
-        pass
 
 
 def _load_json_dict(path: Path) -> dict:
@@ -1512,8 +1491,13 @@ def _declare_dpi_aware() -> None:
 
 if __name__ == "__main__":
     if "--self-test" in sys.argv:
-        # Used by release packaging to verify that all bundled modules import
-        # successfully without creating a window.
+        # Used by release packaging to verify that imports, the bundled Tcl/Tk
+        # runtime, and the Rust extension are all usable. Keep the short-lived
+        # Tk root withdrawn so the self-test does not flash a window.
+        root = tk.Tk()
+        root.withdraw()
+        root.update_idletasks()
+        root.destroy()
         if "--require-rust" in sys.argv and fuzzypaint_engine is None:
             raise SystemExit(2)
         raise SystemExit(0)
