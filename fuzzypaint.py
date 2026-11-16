@@ -20,6 +20,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable, List, Optional, Sequence, Set, Tuple
 
+try:
+    import fuzzypaint_engine as _rust_engine
+except ImportError:
+    _rust_engine = None
+else:
+    if not hasattr(_rust_engine, "find_flat_contact_and_fuzz_envelope"):
+        _rust_engine = None
+
 
 class ConversionError(ValueError):
     """Raised when a project or paint stream cannot be converted safely."""
@@ -161,6 +169,12 @@ class ConversionReport:
     planar_area_protected_mm2: float = 0.0
     overlap_triangles_protected: int = 0
     overlap_area_protected_mm2: float = 0.0
+    flat_contact_triangles_protected: int = 0
+    flat_contact_area_protected_mm2: float = 0.0
+    fuzz_envelope_triangles_protected: int = 0
+    fuzz_envelope_area_protected_mm2: float = 0.0
+    coincident_triangles_protected: int = 0
+    coincident_area_protected_mm2: float = 0.0
     nonmanifold_triangles_protected: int = 0
     nonmanifold_area_protected_mm2: float = 0.0
     single_colour_attributes_removed: int = 0
@@ -294,12 +308,110 @@ def _selected_colour_in_tag(tag: bytes, slots: Optional[Set[int]]) -> bool:
     return any(state > 0 and (slots is None or state in slots) for state in leaf_states(tree))
 
 
+@dataclass(frozen=True)
+class _MeshGeometry:
+    """Geometry shared by protection passes for one 3MF object."""
+
+    vertices: List[Tuple[float, float, float]]
+    source_indices: List[int]
+    vertex_indices: List[Tuple[int, int, int]]
+    triangle_points: List[Tuple[Tuple[float, float, float], ...]]
+    areas: List[float]
+    normals: List[Tuple[float, float, float]]
+    bounds: List[Tuple[Tuple[float, float, float], Tuple[float, float, float]]]
+    selected: List[bool]
+
+
+def _parse_mesh_geometry(
+    object_xml: bytes, slots: Optional[Set[int]]
+) -> Optional[_MeshGeometry]:
+    """Parse reusable triangle geometry while preserving source XML indices."""
+    vertices: List[Tuple[float, float, float]] = []
+    for match in VERTEX_RE.finditer(object_xml):
+        tag = match.group(0)
+        coords = [_simple_attribute(tag, axis) for axis in (b"x", b"y", b"z")]
+        if any(value is None for value in coords):
+            return None
+        vertices.append(tuple(float(value) for value in coords))
+    if not vertices:
+        return None
+
+    source_indices: List[int] = []
+    vertex_indices: List[Tuple[int, int, int]] = []
+    triangle_points: List[Tuple[Tuple[float, float, float], ...]] = []
+    areas: List[float] = []
+    normals: List[Tuple[float, float, float]] = []
+    bounds: List[Tuple[Tuple[float, float, float], Tuple[float, float, float]]] = []
+    selected: List[bool] = []
+    for triangle_index, match in enumerate(TRIANGLE_RE.finditer(object_xml)):
+        tag = match.group(0)
+        raw_indices = [_simple_attribute(tag, key) for key in (b"v1", b"v2", b"v3")]
+        if any(value is None for value in raw_indices):
+            continue
+        indices = tuple(int(value) for value in raw_indices)
+        if any(index < 0 or index >= len(vertices) for index in indices):
+            continue
+        points = tuple(vertices[index] for index in indices)
+        a, b, c = points
+        ab = tuple(b[axis] - a[axis] for axis in range(3))
+        ac = tuple(c[axis] - a[axis] for axis in range(3))
+        cross = (
+            ab[1] * ac[2] - ab[2] * ac[1],
+            ab[2] * ac[0] - ab[0] * ac[2],
+            ab[0] * ac[1] - ab[1] * ac[0],
+        )
+        length = math.sqrt(sum(value * value for value in cross))
+        if length <= 1e-12:
+            continue
+        source_indices.append(triangle_index)
+        vertex_indices.append(indices)
+        triangle_points.append(points)
+        areas.append(length * 0.5)
+        normals.append(tuple(value / length for value in cross))
+        bounds.append(
+            (
+                tuple(min(point[axis] for point in points) for axis in range(3)),
+                tuple(max(point[axis] for point in points) for axis in range(3)),
+            )
+        )
+        selected.append(_selected_colour_in_tag(tag, slots))
+
+    return _MeshGeometry(
+        vertices, source_indices, vertex_indices, triangle_points,
+        areas, normals, bounds, selected,
+    )
+
+
 def _find_planar_protection(
     object_xml: bytes,
     slots: Optional[Set[int]],
     *,
     angle_degrees: float,
     minimum_area_mm2: float,
+    compact_strip_minimum_area_mm2: Optional[float] = None,
+    compact_strip_minimum_aspect_ratio: float = 3.0,
+    compact_strip_minimum_fill_ratio: float = 0.65,
+    compact_strip_maximum_length_mm: float = 30.0,
+    compact_strip_maximum_normal_z: float = 0.1,
+    coplanar_lane_minimum_patch_area_mm2: Optional[float] = None,
+    coplanar_lane_maximum_plane_gap_mm: float = 0.15,
+    coplanar_lane_maximum_side_gap_mm: float = 0.75,
+    coplanar_lane_maximum_forward_gap_mm: float = 15.0,
+    coplanar_lane_minimum_aspect_ratio: float = 3.0,
+    coplanar_lane_minimum_fill_ratio: float = 0.4,
+    coplanar_lane_maximum_length_mm: float = 60.0,
+    coplanar_lane_axis: Optional[
+        Tuple[float, float, float] | Sequence[Tuple[float, float, float]]
+    ] = None,
+    coplanar_lane_axis_minimum_fill_ratio: float = 0.3,
+    layered_feature_maximum_depth_mm: Optional[float] = None,
+    protect_connected_coplanar: bool = False,
+    connected_coplanar_angle_degrees: float = 0.5,
+    connected_coplanar_plane_tolerance_mm: float = 0.02,
+    connected_coplanar_minimum_short_span_mm: float = 0.0,
+    connected_coplanar_minimum_long_span_mm: float = 0.0,
+    connected_coplanar_satellite_gap_mm: float = 0.0,
+    geometry: Optional[_MeshGeometry] = None,
 ) -> Tuple[Set[int], int, float]:
     """Find selected painted triangles belonging to large coplanar patches.
 
@@ -326,72 +438,38 @@ def _find_planar_protection(
     normal change, not noise) still fails the comparison and stops the
     patch growing through it.
 
-    A second pass then absorbs small leftover patches that sit right next
-    to a patch large enough to already be protected on its own. Some
-    models carry genuine small physical steps within an otherwise flat
-    area -- e.g. the faint outline of a boolean cut that didn't go quite
-    deep enough -- which no amount of angle-tolerance tuning should bridge,
-    because the step is real, not mesh noise. But a human looking at the
-    surface still reads the whole thing as "the flat area, with a rough
-    spot," not as a separate feature worth keeping fuzzy, and a few
-    unfuzzed triangles sitting inside a fuzzed field of equally-real
-    paint-job and tool-mark bumps would look far more out of place than
-    just smoothing over the whole patch. Any patch below the area
-    threshold that shares a geometric edge with an admitted patch (directly
-    or via a chain of other small patches) is absorbed into protection too,
-    regardless of its own normal. This can occasionally over-absorb if a
-    long chain of small patches happens to connect a flat area to a
-    genuinely different, separate feature -- accepted as a reasonable
-    trade-off given what it fixes.
+    Patch discovery deliberately considers *all* valid triangles, not only
+    triangles carrying one of the selected paint colours. Paint boundaries
+    are not geometric boundaries: a large flat face remains a large flat
+    face when only part of it is painted. After the geometric patches have
+    been classified by normal and total area, only selected painted
+    triangles inside qualifying patches are returned for protection.
+
+    Qualifying patches do not absorb neighbouring angle-separated patches.
+    Doing that recursively turns ordinary edge connectivity into an
+    effectively unbounded flood fill: one large flat seed can eventually
+    protect an entire connected painted model, including curved and angled
+    details. Every protected patch must therefore meet the flatness and area
+    requirements on its own.
     """
-    vertices = []
-    for match in VERTEX_RE.finditer(object_xml):
-        tag = match.group(0)
-        coords = [_simple_attribute(tag, axis) for axis in (b"x", b"y", b"z")]
-        if any(value is None for value in coords):
-            return set(), 0, 0.0
-        vertices.append(tuple(float(value) for value in coords))
-    if not vertices:
+    geometry = geometry or _parse_mesh_geometry(object_xml, slots)
+    if geometry is None:
         return set(), 0, 0.0
+    vertices = geometry.vertices
+    areas = geometry.areas
+    normals = geometry.normals
+    source_indices = geometry.source_indices
+    vertex_indices = geometry.vertex_indices
+    selected = geometry.selected
 
     def position_key(index: int) -> Tuple[float, float, float]:
         return tuple(round(value, 4) for value in vertices[index])
 
-    areas = []
-    normals = []
-    source_indices = []
-    adjacency: List[List[int]] = []
+    adjacency: List[List[int]] = [[] for _ in areas]
     edge_owner = {}
     cosine_limit = math.cos(math.radians(angle_degrees))
 
-    for triangle_index, match in enumerate(TRIANGLE_RE.finditer(object_xml)):
-        tag = match.group(0)
-        if not _selected_colour_in_tag(tag, slots):
-            continue
-        raw_indices = [_simple_attribute(tag, key) for key in (b"v1", b"v2", b"v3")]
-        if any(value is None for value in raw_indices):
-            continue
-        indices = tuple(int(value) for value in raw_indices)
-        if any(index < 0 or index >= len(vertices) for index in indices):
-            continue
-        a, b, c = (vertices[index] for index in indices)
-        ab = tuple(b[i] - a[i] for i in range(3))
-        ac = tuple(c[i] - a[i] for i in range(3))
-        cross = (
-            ab[1] * ac[2] - ab[2] * ac[1],
-            ab[2] * ac[0] - ab[0] * ac[2],
-            ab[0] * ac[1] - ab[1] * ac[0],
-        )
-        length = math.sqrt(sum(value * value for value in cross))
-        if length <= 1e-12:
-            continue
-        normal = tuple(value / length for value in cross)
-        candidate = len(areas)
-        areas.append(length * 0.5)
-        normals.append(normal)
-        source_indices.append(triangle_index)
-        adjacency.append([])
-
+    for candidate, indices in enumerate(vertex_indices):
         for edge in (
             tuple(sorted((position_key(indices[0]), position_key(indices[1])))),
             tuple(sorted((position_key(indices[1]), position_key(indices[2])))),
@@ -409,7 +487,7 @@ def _find_planar_protection(
     # so it reflects every member merged so far) rather than to whichever
     # single neighbour discovered it -- see the docstring for why.
     visited = [False] * len(areas)
-    patches: List[Tuple[List[int], float]] = []
+    patches: List[Tuple[List[int], float, Tuple[float, float, float]]] = []
     for start in range(len(areas)):
         if visited[start]:
             continue
@@ -434,66 +512,739 @@ def _find_planar_protection(
                 queue.append(neighbor)
                 for axis in range(3):
                     sum_normal[axis] += normals[neighbor][axis] * areas[neighbor]
-        patches.append((members, sum(areas[member] for member in members)))
+        patches.append(
+            (members, sum(areas[member] for member in members), tuple(sum_normal))
+        )
 
-    # Absorb small patches that touch an already-large-enough patch (see the
-    # docstring). Build a patch-level adjacency graph from the same raw,
-    # angle-independent edge adjacency used to grow the patches above, then
-    # flood out from every patch that clears the area threshold on its own.
-    patch_of_candidate = [0] * len(areas)
-    for patch_index, (members, _total_area) in enumerate(patches):
+    def compact_vertical_strip(
+        members: List[int], total_area: float, sum_normal: Tuple[float, float, float]
+    ) -> bool:
+        """Recognise small, dense vertical trapezoids such as recessed channel walls.
+
+        This is deliberately opt-in. A low global area threshold catches many
+        broad but sparse coplanar fragments scattered across decorative rock.
+        Functional channel walls instead occupy most of a compact, elongated
+        vertical bounding rectangle. The fill/aspect/length constraints keep
+        this exception narrow and leave irregular textured regions eligible
+        for fuzz.
+        """
+        if compact_strip_minimum_area_mm2 is None:
+            return False
+        if total_area < compact_strip_minimum_area_mm2:
+            return False
+        normal_length = math.sqrt(sum(value * value for value in sum_normal))
+        if normal_length <= 1e-12:
+            return False
+        normal = tuple(value / normal_length for value in sum_normal)
+        if abs(normal[2]) > compact_strip_maximum_normal_z:
+            return False
+
+        horizontal_length = math.hypot(normal[0], normal[1])
+        if horizontal_length <= 1e-12:
+            return False
+        horizontal = (-normal[1] / horizontal_length, normal[0] / horizontal_length, 0.0)
+        vertical = (
+            normal[1] * horizontal[2] - normal[2] * horizontal[1],
+            normal[2] * horizontal[0] - normal[0] * horizontal[2],
+            normal[0] * horizontal[1] - normal[1] * horizontal[0],
+        )
+
+        horizontal_values = []
+        vertical_values = []
         for member in members:
-            patch_of_candidate[member] = patch_index
+            for vertex_index in vertex_indices[member]:
+                point = vertices[vertex_index]
+                horizontal_values.append(
+                    sum(point[axis] * horizontal[axis] for axis in range(3))
+                )
+                vertical_values.append(
+                    sum(point[axis] * vertical[axis] for axis in range(3))
+                )
+        horizontal_span = max(horizontal_values) - min(horizontal_values)
+        vertical_span = max(vertical_values) - min(vertical_values)
+        shorter = min(horizontal_span, vertical_span)
+        longer = max(horizontal_span, vertical_span)
+        if shorter <= 1e-9 or longer > compact_strip_maximum_length_mm:
+            return False
+        if longer / shorter < compact_strip_minimum_aspect_ratio:
+            return False
+        return (
+            total_area / (horizontal_span * vertical_span)
+            >= compact_strip_minimum_fill_ratio
+        )
 
-    patch_neighbours: List[Set[int]] = [set() for _ in patches]
-    for candidate, neighbours in enumerate(adjacency):
-        this_patch = patch_of_candidate[candidate]
-        for neighbour in neighbours:
-            other_patch = patch_of_candidate[neighbour]
-            if other_patch != this_patch:
-                patch_neighbours[this_patch].add(other_patch)
-                patch_neighbours[other_patch].add(this_patch)
+    def canonical_normal(sum_normal: Tuple[float, float, float]) -> Tuple[float, float, float]:
+        length = math.sqrt(sum(value * value for value in sum_normal))
+        normal = tuple(value / length for value in sum_normal)
+        dominant = max(range(3), key=lambda axis: abs(normal[axis]))
+        return tuple(-value for value in normal) if normal[dominant] < 0 else normal
 
-    admitted = [total_area >= minimum_area_mm2 for _members, total_area in patches]
-    queue: deque = deque(index for index, ok in enumerate(admitted) if ok)
-    while queue:
-        current_patch = queue.popleft()
-        for neighbour_patch in patch_neighbours[current_patch]:
-            if not admitted[neighbour_patch]:
-                admitted[neighbour_patch] = True
-                queue.append(neighbour_patch)
+    def plane_basis(
+        normal: Tuple[float, float, float]
+    ) -> Tuple[Tuple[float, float, float], Tuple[float, float, float]]:
+        reference_axis = min(range(3), key=lambda axis: abs(normal[axis]))
+        reference = tuple(1.0 if axis == reference_axis else 0.0 for axis in range(3))
+        first = (
+            normal[1] * reference[2] - normal[2] * reference[1],
+            normal[2] * reference[0] - normal[0] * reference[2],
+            normal[0] * reference[1] - normal[1] * reference[0],
+        )
+        first_length = math.sqrt(sum(value * value for value in first))
+        first = tuple(value / first_length for value in first)
+        second = (
+            normal[1] * first[2] - normal[2] * first[1],
+            normal[2] * first[0] - normal[0] * first[2],
+            normal[0] * first[1] - normal[1] * first[0],
+        )
+        return first, second
 
-    admitted_candidates = {
-        member
-        for patch_index, (members, _total_area) in enumerate(patches)
-        if admitted[patch_index]
-        for member in members
-    }
+    def project(
+        points: List[Tuple[float, float, float]], axis: Tuple[float, float, float]
+    ) -> List[float]:
+        return [sum(point[index] * axis[index] for index in range(3)) for point in points]
 
-    # Re-group the admitted candidates by plain geometric adjacency (ignoring
-    # normals entirely) so the reported patch count/area reflect the final,
-    # merged regions rather than the original angle-based fragments.
-    visited_final: Set[int] = set()
+    lane_patch_indices: Set[int] = set()
+    layered_patch_indices: Set[int] = set()
+    if coplanar_lane_minimum_patch_area_mm2 is not None:
+        descriptors = []
+        for patch_index, (members, total_area, sum_normal) in enumerate(patches):
+            if not (coplanar_lane_minimum_patch_area_mm2 <= total_area < minimum_area_mm2):
+                continue
+            if not any(selected[member] for member in members):
+                continue
+            unique_vertices = sorted(
+                {vertex for member in members for vertex in vertex_indices[member]}
+            )
+            points = [vertices[index] for index in unique_vertices]
+            normal = canonical_normal(sum_normal)
+            first, second = plane_basis(normal)
+            first_values = project(points, first)
+            second_values = project(points, second)
+            first_span = max(first_values) - min(first_values)
+            second_span = max(second_values) - min(second_values)
+            rectangle_area = first_span * second_span
+            if rectangle_area <= 1e-9 or total_area / rectangle_area < 0.4:
+                continue
+            center = tuple(
+                sum(point[axis] for point in points) / len(points) for axis in range(3)
+            )
+            descriptors.append(
+                {
+                    "patch_index": patch_index,
+                    "points": points,
+                    "normal": normal,
+                    "plane": sum(normal[axis] * center[axis] for axis in range(3)),
+                    "area": total_area,
+                }
+            )
+
+        parents = list(range(len(descriptors)))
+
+        def find(index: int) -> int:
+            while parents[index] != index:
+                parents[index] = parents[parents[index]]
+                index = parents[index]
+            return index
+
+        def union(left: int, right: int) -> None:
+            left_root = find(left)
+            right_root = find(right)
+            if left_root != right_root:
+                parents[right_root] = left_root
+
+        def interval_gap(left_min: float, left_max: float, right_min: float, right_max: float) -> float:
+            return max(0.0, left_min - right_max, right_min - left_max)
+
+        for left_index, left in enumerate(descriptors):
+            first, second = plane_basis(left["normal"])
+            left_first = project(left["points"], first)
+            left_second = project(left["points"], second)
+            for right_index in range(left_index + 1, len(descriptors)):
+                right = descriptors[right_index]
+                dot = sum(left["normal"][axis] * right["normal"][axis] for axis in range(3))
+                if dot < cosine_limit:
+                    continue
+                right_plane_values = project(right["points"], left["normal"])
+                right_plane = sum(right_plane_values) / len(right_plane_values)
+                if abs(left["plane"] - right_plane) > coplanar_lane_maximum_plane_gap_mm:
+                    continue
+                right_first = project(right["points"], first)
+                right_second = project(right["points"], second)
+                first_gap = interval_gap(
+                    min(left_first), max(left_first), min(right_first), max(right_first)
+                )
+                second_gap = interval_gap(
+                    min(left_second), max(left_second), min(right_second), max(right_second)
+                )
+                if (
+                    min(first_gap, second_gap) <= coplanar_lane_maximum_side_gap_mm
+                    and max(first_gap, second_gap) <= coplanar_lane_maximum_forward_gap_mm
+                ):
+                    union(left_index, right_index)
+
+        groups = {}
+        for descriptor_index, descriptor in enumerate(descriptors):
+            groups.setdefault(find(descriptor_index), []).append(descriptor)
+        for group in groups.values():
+            total_area = sum(descriptor["area"] for descriptor in group)
+            if total_area < minimum_area_mm2:
+                continue
+            normal = group[0]["normal"]
+            first, second = plane_basis(normal)
+            points = [point for descriptor in group for point in descriptor["points"]]
+            coordinates = list(zip(project(points, first), project(points, second)))
+            mean_first = sum(value[0] for value in coordinates) / len(coordinates)
+            mean_second = sum(value[1] for value in coordinates) / len(coordinates)
+            centered = [
+                (value[0] - mean_first, value[1] - mean_second) for value in coordinates
+            ]
+            covariance_first = sum(value[0] * value[0] for value in centered) / len(centered)
+            covariance_second = sum(value[1] * value[1] for value in centered) / len(centered)
+            covariance_cross = sum(value[0] * value[1] for value in centered) / len(centered)
+            angle = 0.5 * math.atan2(
+                2.0 * covariance_cross, covariance_first - covariance_second
+            )
+            cosine = math.cos(angle)
+            sine = math.sin(angle)
+            aligned_first = [value[0] * cosine + value[1] * sine for value in centered]
+            aligned_second = [-value[0] * sine + value[1] * cosine for value in centered]
+            first_span = max(aligned_first) - min(aligned_first)
+            second_span = max(aligned_second) - min(aligned_second)
+            shorter = min(first_span, second_span)
+            longer = max(first_span, second_span)
+            if shorter <= 1e-9 or longer > coplanar_lane_maximum_length_mm:
+                continue
+            if longer / shorter < coplanar_lane_minimum_aspect_ratio:
+                continue
+            if total_area / (shorter * longer) < coplanar_lane_minimum_fill_ratio:
+                continue
+            lane_patch_indices.update(descriptor["patch_index"] for descriptor in group)
+
+        # A caller that knows the object's local up-axis can opt into a more
+        # selective directional pass. The generic graph above deliberately
+        # has no preferred direction, but on repeated architectural channels
+        # a horizontal row of coplanar panels can bridge several otherwise
+        # separate vertical lanes into one broad group. Holding each seed's
+        # narrow side-band fixed prevents that transitive sideways walk while
+        # still allowing gaps along the requested lane axis.
+        if coplanar_lane_axis is not None:
+            first_axis_value = coplanar_lane_axis[0]
+            if isinstance(first_axis_value, (int, float)):
+                raw_axes = [coplanar_lane_axis]
+            else:
+                raw_axes = list(coplanar_lane_axis)
+            for raw_axis_value in raw_axes:
+                raw_axis = tuple(float(value) for value in raw_axis_value)
+                if len(raw_axis) != 3:
+                    raise ValueError("each coplanar lane axis must contain three values")
+                raw_axis_length = math.sqrt(sum(value * value for value in raw_axis))
+                if raw_axis_length <= 1e-12:
+                    raise ValueError("coplanar lane axes must be non-zero vectors")
+                raw_axis = tuple(value / raw_axis_length for value in raw_axis)
+                directional_groups: Set[Tuple[int, ...]] = set()
+                for seed_index, seed in enumerate(descriptors):
+                    normal = seed["normal"]
+                    projection = sum(raw_axis[axis] * normal[axis] for axis in range(3))
+                    forward = tuple(
+                        raw_axis[axis] - projection * normal[axis] for axis in range(3)
+                    )
+                    forward_length = math.sqrt(sum(value * value for value in forward))
+                    if forward_length <= 1e-12:
+                        continue
+                    forward = tuple(value / forward_length for value in forward)
+                    side = (
+                        normal[1] * forward[2] - normal[2] * forward[1],
+                        normal[2] * forward[0] - normal[0] * forward[2],
+                        normal[0] * forward[1] - normal[1] * forward[0],
+                    )
+                    seed_side = project(seed["points"], side)
+                    eligible = []
+                    for descriptor_index, descriptor in enumerate(descriptors):
+                        dot = sum(
+                            normal[axis] * descriptor["normal"][axis] for axis in range(3)
+                        )
+                        if dot < cosine_limit:
+                            continue
+                        descriptor_plane_values = project(descriptor["points"], normal)
+                        descriptor_plane = sum(descriptor_plane_values) / len(
+                            descriptor_plane_values
+                        )
+                        if abs(seed["plane"] - descriptor_plane) > coplanar_lane_maximum_plane_gap_mm:
+                            continue
+                        descriptor_side = project(descriptor["points"], side)
+                        if interval_gap(
+                            min(seed_side),
+                            max(seed_side),
+                            min(descriptor_side),
+                            max(descriptor_side),
+                        ) > coplanar_lane_maximum_side_gap_mm:
+                            continue
+                        descriptor_forward = project(descriptor["points"], forward)
+                        eligible.append(
+                            (
+                                descriptor_index,
+                                min(descriptor_forward),
+                                max(descriptor_forward),
+                            )
+                        )
+                    if not any(index == seed_index for index, _minimum, _maximum in eligible):
+                        continue
+                    component = {seed_index}
+                    changed = True
+                    while changed:
+                        changed = False
+                        for descriptor_index, minimum, maximum in eligible:
+                            if descriptor_index in component:
+                                continue
+                            for member_index in component:
+                                member_forward = project(
+                                    descriptors[member_index]["points"], forward
+                                )
+                                if interval_gap(
+                                    minimum,
+                                    maximum,
+                                    min(member_forward),
+                                    max(member_forward),
+                                ) <= coplanar_lane_maximum_forward_gap_mm:
+                                    component.add(descriptor_index)
+                                    changed = True
+                                    break
+                    if len(component) > 1:
+                        directional_groups.add(tuple(sorted(component)))
+
+                for descriptor_indices in directional_groups:
+                    group = [descriptors[index] for index in descriptor_indices]
+                    total_area = sum(descriptor["area"] for descriptor in group)
+                    if total_area < minimum_area_mm2:
+                        continue
+                    normal = group[0]["normal"]
+                    projection = sum(raw_axis[axis] * normal[axis] for axis in range(3))
+                    forward = tuple(
+                        raw_axis[axis] - projection * normal[axis] for axis in range(3)
+                    )
+                    forward_length = math.sqrt(sum(value * value for value in forward))
+                    if forward_length <= 1e-12:
+                        continue
+                    forward = tuple(value / forward_length for value in forward)
+                    side = (
+                        normal[1] * forward[2] - normal[2] * forward[1],
+                        normal[2] * forward[0] - normal[0] * forward[2],
+                        normal[0] * forward[1] - normal[1] * forward[0],
+                    )
+                    points = [point for descriptor in group for point in descriptor["points"]]
+                    side_values = project(points, side)
+                    forward_values = project(points, forward)
+                    side_span = max(side_values) - min(side_values)
+                    lane_length = max(forward_values) - min(forward_values)
+                    if side_span <= 1e-9 or lane_length > coplanar_lane_maximum_length_mm:
+                        continue
+                    if lane_length / side_span < coplanar_lane_minimum_aspect_ratio:
+                        continue
+                    if total_area / (side_span * lane_length) < coplanar_lane_axis_minimum_fill_ratio:
+                        continue
+                    lane_patch_indices.update(
+                        descriptor["patch_index"] for descriptor in group
+                    )
+
+        # Protect one directly adjacent small coplanar satellite of an
+        # already-qualifying elongated, compact-strip, or lane patch. This is intentionally a
+        # one-hop classification over the original patches: newly accepted
+        # satellites never become hosts, so it cannot recreate the old
+        # recursive absorption flood-fill.
+        satellite_hosts = []
+        for patch_index, (members, total_area, sum_normal) in enumerate(patches):
+            if not any(selected[member] for member in members):
+                continue
+            unique_vertices = sorted(
+                {vertex for member in members for vertex in vertex_indices[member]}
+            )
+            points = [vertices[index] for index in unique_vertices]
+            normal = canonical_normal(sum_normal)
+            first, second = plane_basis(normal)
+            coordinates = list(zip(project(points, first), project(points, second)))
+            mean_first = sum(value[0] for value in coordinates) / len(coordinates)
+            mean_second = sum(value[1] for value in coordinates) / len(coordinates)
+            centered = [
+                (value[0] - mean_first, value[1] - mean_second) for value in coordinates
+            ]
+            covariance_first = sum(value[0] * value[0] for value in centered) / len(centered)
+            covariance_second = sum(value[1] * value[1] for value in centered) / len(centered)
+            covariance_cross = sum(value[0] * value[1] for value in centered) / len(centered)
+            angle = 0.5 * math.atan2(
+                2.0 * covariance_cross, covariance_first - covariance_second
+            )
+            cosine = math.cos(angle)
+            sine = math.sin(angle)
+            aligned_first = [value[0] * cosine + value[1] * sine for value in centered]
+            aligned_second = [-value[0] * sine + value[1] * cosine for value in centered]
+            first_span = max(aligned_first) - min(aligned_first)
+            second_span = max(aligned_second) - min(aligned_second)
+            shorter = min(first_span, second_span)
+            longer = max(first_span, second_span)
+            elongated_large = (
+                total_area >= minimum_area_mm2
+                and shorter > 1e-9
+                and longer <= coplanar_lane_maximum_length_mm
+                and longer / shorter >= coplanar_lane_minimum_aspect_ratio
+                and total_area / (shorter * longer) >= coplanar_lane_minimum_fill_ratio
+            )
+            compact_host = compact_vertical_strip(members, total_area, sum_normal)
+            lane_host = patch_index in lane_patch_indices
+            if not (elongated_large or compact_host or lane_host):
+                continue
+            center = tuple(
+                sum(point[axis] for point in points) / len(points) for axis in range(3)
+            )
+            satellite_hosts.append(
+                {
+                    "patch_index": patch_index,
+                    "points": points,
+                    "normal": normal,
+                    "plane": sum(normal[axis] * center[axis] for axis in range(3)),
+                }
+            )
+
+        satellite_candidates = []
+        for patch_index, (members, total_area, sum_normal) in enumerate(patches):
+            # Once a surface has independently qualified as a compact strip or
+            # lane, admit even sub-threshold disconnected fragments that sit
+            # directly beside it on the same plane.  Repair operations often
+            # weld these slivers into their host; unrepaired exports leave them
+            # as separate pieces.  This remains a one-hop classification:
+            # admitted fragments never become hosts and cannot flood onward.
+            if not (0.0 < total_area < minimum_area_mm2):
+                continue
+            if not any(selected[member] for member in members):
+                continue
+            unique_vertices = sorted(
+                {vertex for member in members for vertex in vertex_indices[member]}
+            )
+            points = [vertices[index] for index in unique_vertices]
+            normal = canonical_normal(sum_normal)
+            center = tuple(
+                sum(point[axis] for point in points) / len(points) for axis in range(3)
+            )
+            satellite_candidates.append(
+                {
+                    "patch_index": patch_index,
+                    "points": points,
+                    "normal": normal,
+                    "plane": sum(normal[axis] * center[axis] for axis in range(3)),
+                }
+            )
+
+        for descriptor in satellite_candidates:
+            for host in satellite_hosts:
+                if descriptor["patch_index"] == host["patch_index"]:
+                    continue
+                dot = sum(
+                    descriptor["normal"][axis] * host["normal"][axis]
+                    for axis in range(3)
+                )
+                if dot < cosine_limit:
+                    continue
+                host_plane_values = project(host["points"], descriptor["normal"])
+                host_plane = sum(host_plane_values) / len(host_plane_values)
+                if abs(descriptor["plane"] - host_plane) > coplanar_lane_maximum_plane_gap_mm:
+                    continue
+                first, second = plane_basis(descriptor["normal"])
+                descriptor_first = project(descriptor["points"], first)
+                descriptor_second = project(descriptor["points"], second)
+                host_first = project(host["points"], first)
+                host_second = project(host["points"], second)
+                first_gap = interval_gap(
+                    min(descriptor_first),
+                    max(descriptor_first),
+                    min(host_first),
+                    max(host_first),
+                )
+                second_gap = interval_gap(
+                    min(descriptor_second),
+                    max(descriptor_second),
+                    min(host_second),
+                    max(host_second),
+                )
+                if math.hypot(first_gap, second_gap) <= coplanar_lane_maximum_side_gap_mm:
+                    lane_patch_indices.add(descriptor["patch_index"])
+                    break
+
+        if layered_feature_maximum_depth_mm is not None:
+            layered_candidates = [
+                descriptor
+                for descriptor in satellite_candidates
+                if patches[descriptor["patch_index"]][1]
+                >= coplanar_lane_minimum_patch_area_mm2
+            ]
+            layered_pairs = []
+            for left_index, left in enumerate(layered_candidates):
+                for right in layered_candidates[left_index + 1 :]:
+                    dot = sum(
+                        left["normal"][axis] * right["normal"][axis]
+                        for axis in range(3)
+                    )
+                    if dot < cosine_limit:
+                        continue
+                    right_plane_values = project(right["points"], left["normal"])
+                    right_plane = sum(right_plane_values) / len(right_plane_values)
+                    plane_gap = abs(left["plane"] - right_plane)
+                    if not (
+                        coplanar_lane_maximum_plane_gap_mm
+                        < plane_gap
+                        <= layered_feature_maximum_depth_mm
+                    ):
+                        continue
+                    first, second = plane_basis(left["normal"])
+                    left_first = project(left["points"], first)
+                    left_second = project(left["points"], second)
+                    right_first = project(right["points"], first)
+                    right_second = project(right["points"], second)
+                    first_overlap = min(max(left_first), max(right_first)) - max(
+                        min(left_first), min(right_first)
+                    )
+                    second_overlap = min(max(left_second), max(right_second)) - max(
+                        min(left_second), min(right_second)
+                    )
+                    if first_overlap > 0.0 and second_overlap > 0.0:
+                        layered_patch_indices.add(left["patch_index"])
+                        layered_patch_indices.add(right["patch_index"])
+                        layered_pairs.append(
+                            {
+                                "normal": left["normal"],
+                                "first": first,
+                                "second": second,
+                                "plane_min": min(left["plane"], right_plane),
+                                "plane_max": max(left["plane"], right_plane),
+                                "first_min": max(min(left_first), min(right_first)),
+                                "first_max": min(max(left_first), max(right_first)),
+                                "second_min": max(min(left_second), min(right_second)),
+                                "second_max": min(max(left_second), max(right_second)),
+                            }
+                        )
+
+            # A repaired shallow feature often has many sub-5mm² bevel and
+            # transition fragments between its two confirmed parallel faces.
+            # Admit only fragments whose centroid stays inside that face pair's
+            # shallow depth slab and overlapping footprint (plus the same small
+            # in-plane tolerance used by the lane classifier). This is a bounded
+            # spatial closure, not a recursive topology walk.
+            for patch_index, (members, total_area, _sum_normal) in enumerate(patches):
+                if total_area >= coplanar_lane_minimum_patch_area_mm2:
+                    continue
+                if not any(selected[member] for member in members):
+                    continue
+                unique_vertices = sorted(
+                    {vertex for member in members for vertex in vertex_indices[member]}
+                )
+                points = [vertices[index] for index in unique_vertices]
+                center = tuple(
+                    sum(point[axis] for point in points) / len(points)
+                    for axis in range(3)
+                )
+                for pair in layered_pairs:
+                    plane = sum(center[axis] * pair["normal"][axis] for axis in range(3))
+                    if not (
+                        pair["plane_min"] - coplanar_lane_maximum_plane_gap_mm
+                        <= plane
+                        <= pair["plane_max"] + coplanar_lane_maximum_plane_gap_mm
+                    ):
+                        continue
+                    first_value = sum(
+                        center[axis] * pair["first"][axis] for axis in range(3)
+                    )
+                    second_value = sum(
+                        center[axis] * pair["second"][axis] for axis in range(3)
+                    )
+                    margin = coplanar_lane_maximum_side_gap_mm
+                    if not (
+                        pair["first_min"] - margin
+                        <= first_value
+                        <= pair["first_max"] + margin
+                        and pair["second_min"] - margin
+                        <= second_value
+                        <= pair["second_max"] + margin
+                    ):
+                        continue
+                    layered_patch_indices.add(patch_index)
+                    break
+
     protected = set()
     protected_patch_count = 0
     protected_area = 0.0
-    for start in admitted_candidates:
-        if start in visited_final:
+    for patch_index, (members, total_area, sum_normal) in enumerate(patches):
+        if total_area < minimum_area_mm2 and not compact_vertical_strip(
+            members, total_area, sum_normal
+        ) and patch_index not in lane_patch_indices and patch_index not in layered_patch_indices:
             continue
-        visited_final.add(start)
-        group = [start]
-        stack = [start]
-        while stack:
-            current = stack.pop()
-            for neighbour in adjacency[current]:
-                if neighbour in admitted_candidates and neighbour not in visited_final:
-                    visited_final.add(neighbour)
-                    group.append(neighbour)
-                    stack.append(neighbour)
+        selected_members = [member for member in members if selected[member]]
+        if not selected_members:
+            continue
         protected_patch_count += 1
-        protected_area += sum(areas[member] for member in group)
-        for member in group:
+        protected_area += sum(areas[member] for member in selected_members)
+        for member in selected_members:
             protected.add(source_indices[member])
+
+    if protect_connected_coplanar:
+        # A deliberately simple interpretation of a slicer's visible "face":
+        # at least two edge-connected triangles occupying the same plane. This
+        # is independent of area, aspect ratio, orientation and object-specific
+        # coordinates. Compare every candidate to the component seed rather
+        # than walking normal-to-normal, preventing gradual curvature from
+        # accumulating into a supposedly flat component.
+        strict_cosine = math.cos(math.radians(connected_coplanar_angle_degrees))
+        strict_visited = [False] * len(areas)
+        strict_components = []
+        for start in range(len(areas)):
+            if strict_visited[start]:
+                continue
+            strict_visited[start] = True
+            members = [start]
+            queue = deque([start])
+            seed_normal = normals[start]
+            seed_point = vertices[vertex_indices[start][0]]
+            while queue:
+                current = queue.popleft()
+                for neighbor in adjacency[current]:
+                    if strict_visited[neighbor]:
+                        continue
+                    dot = sum(
+                        seed_normal[axis] * normals[neighbor][axis]
+                        for axis in range(3)
+                    )
+                    if abs(dot) < strict_cosine:
+                        continue
+                    if any(
+                        abs(
+                            sum(
+                                (vertices[vertex_index][axis] - seed_point[axis])
+                                * seed_normal[axis]
+                                for axis in range(3)
+                            )
+                        )
+                        > connected_coplanar_plane_tolerance_mm
+                        for vertex_index in vertex_indices[neighbor]
+                    ):
+                        continue
+                    strict_visited[neighbor] = True
+                    members.append(neighbor)
+                    queue.append(neighbor)
+            component_points = [
+                vertices[vertex_index]
+                for vertex_index in {
+                    vertex_index
+                    for member in members
+                    for vertex_index in vertex_indices[member]
+                }
+            ]
+            spans = (0.0, 0.0)
+            if len(component_points) >= 2:
+                first, second = plane_basis(seed_normal)
+                coordinates = list(
+                    zip(project(component_points, first), project(component_points, second))
+                )
+                mean_first = sum(value[0] for value in coordinates) / len(coordinates)
+                mean_second = sum(value[1] for value in coordinates) / len(coordinates)
+                centered = [
+                    (value[0] - mean_first, value[1] - mean_second)
+                    for value in coordinates
+                ]
+                covariance_first = sum(value[0] * value[0] for value in centered)
+                covariance_second = sum(value[1] * value[1] for value in centered)
+                covariance_cross = sum(value[0] * value[1] for value in centered)
+                angle = 0.5 * math.atan2(
+                    2.0 * covariance_cross, covariance_first - covariance_second
+                )
+                cosine = math.cos(angle)
+                sine = math.sin(angle)
+                aligned_first = [
+                    value[0] * cosine + value[1] * sine for value in centered
+                ]
+                aligned_second = [
+                    -value[0] * sine + value[1] * cosine for value in centered
+                ]
+                spans = sorted(
+                    (
+                        max(aligned_first) - min(aligned_first),
+                        max(aligned_second) - min(aligned_second),
+                    )
+                )
+            bounds = tuple(
+                (min(point[axis] for point in component_points),
+                 max(point[axis] for point in component_points))
+                for axis in range(3)
+            )
+            qualifies = (
+                len(members) >= 2
+                and spans[0] >= connected_coplanar_minimum_short_span_mm
+                and spans[1] >= connected_coplanar_minimum_long_span_mm
+            )
+            strict_components.append(
+                (members, component_points, seed_normal, seed_point, bounds, qualifies)
+            )
+
+        qualifying_components = [
+            component for component in strict_components if component[5]
+        ]
+        satellite_cell_size = max(1.0, connected_coplanar_satellite_gap_mm * 4.0)
+
+        def satellite_cells(component_bounds, margin=0.0):
+            ranges = [
+                range(
+                    math.floor((component_bounds[axis][0] - margin) / satellite_cell_size),
+                    math.floor((component_bounds[axis][1] + margin) / satellite_cell_size) + 1,
+                )
+                for axis in range(3)
+            ]
+            for x in ranges[0]:
+                for y in ranges[1]:
+                    for z in ranges[2]:
+                        yield (x, y, z)
+
+        anchor_grid = {}
+        for anchor_index, anchor in enumerate(qualifying_components):
+            for cell in satellite_cells(anchor[4], connected_coplanar_satellite_gap_mm):
+                anchor_grid.setdefault(cell, []).append(anchor_index)
+
+        for component in strict_components:
+            members, component_points, seed_normal, seed_point, bounds, qualifies = component
+            if not qualifies and connected_coplanar_satellite_gap_mm > 0.0:
+                nearby_anchor_indices = {
+                    anchor_index
+                    for cell in satellite_cells(bounds)
+                    for anchor_index in anchor_grid.get(cell, ())
+                }
+                for anchor_index in nearby_anchor_indices:
+                    anchor = qualifying_components[anchor_index]
+                    _, anchor_points, anchor_normal, anchor_point, anchor_bounds, _ = anchor
+                    axis_gaps = [
+                        max(0.0, anchor_bounds[axis][0] - bounds[axis][1],
+                            bounds[axis][0] - anchor_bounds[axis][1])
+                        for axis in range(3)
+                    ]
+                    if math.sqrt(sum(gap * gap for gap in axis_gaps)) > connected_coplanar_satellite_gap_mm:
+                        continue
+                    dot = abs(sum(seed_normal[axis] * anchor_normal[axis] for axis in range(3)))
+                    if dot < strict_cosine:
+                        continue
+                    if any(
+                        abs(sum((point[axis] - anchor_point[axis]) * anchor_normal[axis] for axis in range(3)))
+                        > connected_coplanar_plane_tolerance_mm
+                        for point in component_points
+                    ):
+                        continue
+                    qualifies = True
+                    break
+            if not qualifies:
+                continue
+            newly_protected = [
+                member
+                for member in members
+                if selected[member] and source_indices[member] not in protected
+            ]
+            if not newly_protected:
+                continue
+            protected_patch_count += 1
+            protected_area += sum(areas[member] for member in newly_protected)
+            protected.update(source_indices[member] for member in newly_protected)
     return protected, protected_patch_count, protected_area
 
 
@@ -521,11 +1272,32 @@ def _find_overlap_protection(
     object_xml: bytes,
     *,
     max_gap_mm: float = 0.3,
+    depth_mm: float = 0.3,
     cell_size_mm: float = 1.0,
 ) -> Tuple[Set[int], dict[int, float]]:
     """Find triangles belonging to a geometrically disconnected piece of the
     same object that physically touches/crosses another piece, regardless
     of paint colour, and never fuzz them.
+
+    Protection is found in two passes, both using the same tight
+    `max_gap_mm` by default (`depth_mm` defaults to equal `max_gap_mm`,
+    making pass two a no-op re-check of pass one). The two-pass structure
+    exists for `depth_mm` to be raised above `max_gap_mm` later if a real
+    case needs it, but raising it was tried on a real model and rejected:
+    kitbashed rock chunks sit close to their *own* neighbours across most
+    of their own surface (that is how a packed rock wall is built), so
+    once two shells are confirmed touching anywhere, widening the search
+    radius to "anything else nearby" does not find just the embedded tip
+    -- on a real 30,748-triangle test piece, `depth_mm=1.0` already
+    protected 34.6% of the whole mesh, `depth_mm=3.0` protected 76.6%,
+    climbing almost linearly with no natural plateau. There is no fixed
+    Euclidean radius that separates "the part of this rock actually buried
+    in the wall" from "the rest of this small rock that merely sits near
+    its neighbours," because both are the same few millimetres across. A
+    correct version of "protect deeper" would have to grow along the
+    confirmed-touching shell's own connected surface outward from the
+    actual contact point (a geodesic flood-fill), not by straight-line
+    distance to the other shell -- not implemented here.
 
     Hand-sculpted/kitbashed terrain models are frequently exported as many
     separate stone/rock chunks merged into one object without ever being
@@ -679,23 +1451,684 @@ def _find_overlap_protection(
                                 seen.add(other)
                                 yield other
 
-    flagged = [False] * count
+    # Pass one: which pairs of shells actually touch, at the tight gap.
+    touching_shell_pairs: Set[Tuple[int, int]] = set()
     for candidate in range(count):
-        if flagged[candidate]:
-            continue
         shell = shell_of[candidate]
         centroid = centroids[candidate]
         for other in neighbours(triangle_cells[candidate]):
-            if other == candidate or flagged[other] or shell_of[other] == shell:
+            if other == candidate or shell_of[other] == shell:
                 continue
             if _point_to_triangle_distance_approx(centroid, triangle_points[other]) > max_gap_mm:
                 continue
+            touching_shell_pairs.add(tuple(sorted((shell, shell_of[other]))))
+
+    if not touching_shell_pairs:
+        return set(), {}
+
+    touching_shells = {shell for pair in touching_shell_pairs for shell in pair}
+
+    # Pass two: for triangles belonging to a confirmed-touching shell, widen
+    # the search to depth_mm, but only count a hit against the specific
+    # other shell that pair was confirmed touching in pass one.
+    cell_radius = max(1, math.ceil(depth_mm / cell_size_mm))
+
+    def neighbours_wide(cells: Set[Tuple[int, int, int]]) -> Iterable[int]:
+        seen: Set[int] = set()
+        for cx, cy, cz in cells:
+            for dx in range(-cell_radius, cell_radius + 1):
+                for dy in range(-cell_radius, cell_radius + 1):
+                    for dz in range(-cell_radius, cell_radius + 1):
+                        for other in grid.get((cx + dx, cy + dy, cz + dz), ()):
+                            if other not in seen:
+                                seen.add(other)
+                                yield other
+
+    flagged = [False] * count
+    for candidate in range(count):
+        shell = shell_of[candidate]
+        if shell not in touching_shells:
+            continue
+        centroid = centroids[candidate]
+        for other in neighbours_wide(triangle_cells[candidate]):
+            if other == candidate:
+                continue
+            other_shell = shell_of[other]
+            if other_shell == shell:
+                continue
+            if tuple(sorted((shell, other_shell))) not in touching_shell_pairs:
+                continue
+            if _point_to_triangle_distance_approx(centroid, triangle_points[other]) > depth_mm:
+                continue
             flagged[candidate] = True
-            flagged[other] = True
             break
 
     protected = {source_indices[index] for index in range(count) if flagged[index]}
     area_by_index = {source_indices[index]: areas[index] for index in range(count) if flagged[index]}
+    return protected, area_by_index
+
+
+def _find_flat_contact_protection(
+    object_xml: bytes,
+    slots: Optional[Set[int]],
+    *,
+    max_gap_mm: float = 0.05,
+    angle_degrees: float = 2.0,
+    minimum_overlap_area_mm2: float = 0.01,
+    cell_size_mm: float = 1.0,
+    geometry: Optional[_MeshGeometry] = None,
+) -> Tuple[Set[int], dict[int, float]]:
+    """Protect painted triangles whose faces truly lie flat against another face.
+
+    This deliberately tests the contact footprint itself rather than treating
+    disconnected shells, proximity, or non-manifold topology as intent. Faces
+    may belong to the same messy shell or to separate objects. A pair qualifies
+    only when its normals are nearly parallel/anti-parallel, its plane gap is
+    near zero, and its projected triangles overlap by positive area. Only the
+    participating painted triangles are protected; protection never grows to
+    their surrounding flat patches.
+    """
+    geometry = geometry or _parse_mesh_geometry(object_xml, slots)
+    if geometry is None:
+        return set(), {}
+    source_indices = geometry.source_indices
+    areas = geometry.areas
+    normals = geometry.normals
+    triangle_points = geometry.triangle_points
+    selected = geometry.selected
+    bounds = geometry.bounds
+
+    count = len(source_indices)
+    if count == 0 or not any(selected):
+        return set(), {}
+
+    def cells_for(candidate: int) -> Iterable[Tuple[int, int, int]]:
+        minimum, maximum = bounds[candidate]
+        ranges = [
+            range(
+                math.floor((minimum[axis] - max_gap_mm) / cell_size_mm),
+                math.floor((maximum[axis] + max_gap_mm) / cell_size_mm) + 1,
+            )
+            for axis in range(3)
+        ]
+        for x in ranges[0]:
+            for y in ranges[1]:
+                for z in ranges[2]:
+                    yield (x, y, z)
+
+    grid: dict = {}
+    triangle_cells = []
+    for candidate in range(count):
+        cells = tuple(cells_for(candidate))
+        triangle_cells.append(cells)
+        for cell in cells:
+            grid.setdefault(cell, []).append(candidate)
+
+    def polygon_area(points: List[Tuple[float, float]]) -> float:
+        return 0.5 * abs(
+            sum(
+                points[index][0] * points[(index + 1) % len(points)][1]
+                - points[(index + 1) % len(points)][0] * points[index][1]
+                for index in range(len(points))
+            )
+        ) if len(points) >= 3 else 0.0
+
+    def clipped_overlap_area(
+        subject: List[Tuple[float, float]], clip: List[Tuple[float, float]]
+    ) -> float:
+        orientation = sum(
+            clip[index][0] * clip[(index + 1) % 3][1]
+            - clip[(index + 1) % 3][0] * clip[index][1]
+            for index in range(3)
+        )
+        if orientation < 0.0:
+            clip = list(reversed(clip))
+        output = subject
+        for edge_index in range(3):
+            edge_start = clip[edge_index]
+            edge_end = clip[(edge_index + 1) % 3]
+            input_points = output
+            output = []
+            if not input_points:
+                break
+
+            def side(point: Tuple[float, float]) -> float:
+                return (
+                    (edge_end[0] - edge_start[0]) * (point[1] - edge_start[1])
+                    - (edge_end[1] - edge_start[1]) * (point[0] - edge_start[0])
+                )
+
+            previous = input_points[-1]
+            previous_side = side(previous)
+            for current in input_points:
+                current_side = side(current)
+                if current_side >= -1e-9:
+                    if previous_side < -1e-9:
+                        denominator = previous_side - current_side
+                        ratio = previous_side / denominator
+                        output.append(
+                            (
+                                previous[0] + ratio * (current[0] - previous[0]),
+                                previous[1] + ratio * (current[1] - previous[1]),
+                            )
+                        )
+                    output.append(current)
+                elif previous_side >= -1e-9:
+                    denominator = previous_side - current_side
+                    ratio = previous_side / denominator
+                    output.append(
+                        (
+                            previous[0] + ratio * (current[0] - previous[0]),
+                            previous[1] + ratio * (current[1] - previous[1]),
+                        )
+                    )
+                previous = current
+                previous_side = current_side
+        return polygon_area(output)
+
+    cosine_limit = math.cos(math.radians(angle_degrees))
+    flagged: Set[int] = set()
+    checked_pairs: Set[Tuple[int, int]] = set()
+    for candidate in range(count):
+        if not selected[candidate]:
+            continue
+        candidate_minimum, candidate_maximum = bounds[candidate]
+        nearby: Set[int] = set()
+        for cell in triangle_cells[candidate]:
+            nearby.update(grid.get(cell, ()))
+        for other in nearby:
+            if other == candidate:
+                continue
+            other_minimum, other_maximum = bounds[other]
+            if any(
+                candidate_maximum[axis] + max_gap_mm < other_minimum[axis]
+                or other_maximum[axis] + max_gap_mm < candidate_minimum[axis]
+                for axis in range(3)
+            ):
+                continue
+            pair = tuple(sorted((candidate, other)))
+            if pair in checked_pairs:
+                continue
+            checked_pairs.add(pair)
+            dot = sum(normals[candidate][axis] * normals[other][axis] for axis in range(3))
+            if abs(dot) < cosine_limit:
+                continue
+            relative = tuple(
+                triangle_points[candidate][0][axis] - triangle_points[other][0][axis]
+                for axis in range(3)
+            )
+            gap = abs(sum(relative[axis] * normals[other][axis] for axis in range(3)))
+            if gap > max_gap_mm:
+                continue
+            drop_axis = max(range(3), key=lambda axis: abs(normals[candidate][axis]))
+            keep_axes = [axis for axis in range(3) if axis != drop_axis]
+            first = [
+                (point[keep_axes[0]], point[keep_axes[1]])
+                for point in triangle_points[candidate]
+            ]
+            second = [
+                (point[keep_axes[0]], point[keep_axes[1]])
+                for point in triangle_points[other]
+            ]
+            projected_overlap = clipped_overlap_area(first, second)
+            normal_scale = abs(normals[candidate][drop_axis])
+            if normal_scale <= 1e-9:
+                continue
+            overlap_area = projected_overlap / normal_scale
+            if overlap_area < minimum_overlap_area_mm2:
+                continue
+            flagged.add(candidate)
+            if selected[other]:
+                flagged.add(other)
+
+    protected = {source_indices[index] for index in flagged}
+    area_by_index = {source_indices[index]: areas[index] for index in flagged}
+    return protected, area_by_index
+
+
+def _find_fuzz_envelope_protection(
+    object_xml: bytes,
+    slots: Optional[Set[int]],
+    *,
+    distance_mm: float,
+    contact_seed_indices: Optional[Set[int]] = None,
+    contact_neighbor_rings: int = 1,
+    cell_size_mm: float = 2.0,
+    geometry: Optional[_MeshGeometry] = None,
+) -> Tuple[Set[int], dict[int, float]]:
+    """Protect painted faces whose fuzzy displacement can hit another face.
+
+    A coincident contact test catches the face lying against an obstruction,
+    but not the angled faces surrounding it.  Their displaced fuzzy points can
+    still poke through the obstruction.  Sample each painted triangle's
+    interior and cast a segment in both normal directions for the configured
+    fuzzy thickness.  A real segment/triangle hit protects only that source
+    triangle.  Hits at the segment origin are ignored, so ordinary shared
+    edges and vertices do not qualify by themselves.
+    """
+    if distance_mm <= 0.0:
+        return set(), {}
+
+    geometry = geometry or _parse_mesh_geometry(object_xml, slots)
+    if geometry is None:
+        return set(), {}
+    vertices = geometry.vertices
+    source_indices = geometry.source_indices
+    triangle_points = geometry.triangle_points
+    triangle_vertex_indices = geometry.vertex_indices
+    normals = geometry.normals
+    areas = geometry.areas
+    selected = geometry.selected
+    bounds = geometry.bounds
+
+    if not any(selected):
+        return set(), {}
+
+    eligible: Optional[Set[int]] = None
+    if contact_seed_indices is not None:
+        source_to_internal = {
+            source_index: internal_index
+            for internal_index, source_index in enumerate(source_indices)
+        }
+        seed_internal = {
+            source_to_internal[source_index]
+            for source_index in contact_seed_indices
+            if source_index in source_to_internal
+        }
+        if not seed_internal:
+            return set(), {}
+        edge_owners: dict = {}
+        adjacency: List[Set[int]] = [set() for _ in source_indices]
+
+        def point_key(vertex_index: int):
+            return tuple(round(value, 4) for value in vertices[vertex_index])
+
+        for internal_index, indices in enumerate(triangle_vertex_indices):
+            for left, right in ((0, 1), (1, 2), (2, 0)):
+                edge = tuple(sorted((point_key(indices[left]), point_key(indices[right]))))
+                for owner in edge_owners.get(edge, ()):
+                    adjacency[internal_index].add(owner)
+                    adjacency[owner].add(internal_index)
+                edge_owners.setdefault(edge, []).append(internal_index)
+        eligible = set(seed_internal)
+        frontier = set(seed_internal)
+        for _ in range(max(0, contact_neighbor_rings)):
+            frontier = {
+                neighbor
+                for current in frontier
+                for neighbor in adjacency[current]
+                if neighbor not in eligible
+            }
+            if not frontier:
+                break
+            eligible.update(frontier)
+
+    def cells_for(minimum, maximum, margin=0.0):
+        ranges = [
+            range(
+                math.floor((minimum[axis] - margin) / cell_size_mm),
+                math.floor((maximum[axis] + margin) / cell_size_mm) + 1,
+            )
+            for axis in range(3)
+        ]
+        for x in ranges[0]:
+            for y in ranges[1]:
+                for z in ranges[2]:
+                    yield (x, y, z)
+
+    grid: dict[Tuple[int, int, int], List[int]] = {}
+    for triangle_index, (minimum, maximum) in enumerate(bounds):
+        for cell in cells_for(minimum, maximum):
+            grid.setdefault(cell, []).append(triangle_index)
+
+    def cross_product(left, right):
+        return (
+            left[1] * right[2] - left[2] * right[1],
+            left[2] * right[0] - left[0] * right[2],
+            left[0] * right[1] - left[1] * right[0],
+        )
+
+    def segment_hits_triangle(origin, direction, target) -> bool:
+        first, second, third = target
+        edge_one = tuple(second[axis] - first[axis] for axis in range(3))
+        edge_two = tuple(third[axis] - first[axis] for axis in range(3))
+        h = cross_product(direction, edge_two)
+        determinant = sum(edge_one[axis] * h[axis] for axis in range(3))
+        if abs(determinant) <= 1e-10:
+            return False
+        inverse = 1.0 / determinant
+        offset = tuple(origin[axis] - first[axis] for axis in range(3))
+        u = inverse * sum(offset[axis] * h[axis] for axis in range(3))
+        if u < -1e-9 or u > 1.0 + 1e-9:
+            return False
+        q = cross_product(offset, edge_one)
+        v = inverse * sum(direction[axis] * q[axis] for axis in range(3))
+        if v < -1e-9 or u + v > 1.0 + 1e-9:
+            return False
+        travel = inverse * sum(edge_two[axis] * q[axis] for axis in range(3))
+        return 1e-5 < travel <= distance_mm + 1e-9
+
+    sample_weights = (
+        (1 / 3, 1 / 3, 1 / 3),
+        (0.80, 0.10, 0.10),
+        (0.10, 0.80, 0.10),
+        (0.10, 0.10, 0.80),
+        (0.45, 0.45, 0.10),
+        (0.10, 0.45, 0.45),
+        (0.45, 0.10, 0.45),
+    )
+    flagged: Set[int] = set()
+    for candidate, is_selected in enumerate(selected):
+        if not is_selected:
+            continue
+        if eligible is not None and candidate not in eligible:
+            continue
+        minimum, maximum = bounds[candidate]
+        nearby: Set[int] = set()
+        for cell in cells_for(minimum, maximum, distance_mm):
+            nearby.update(grid.get(cell, ()))
+        nearby.discard(candidate)
+        if not nearby:
+            continue
+        points = triangle_points[candidate]
+        normal = normals[candidate]
+        swept_minimum = tuple(
+            minimum[axis] - abs(normal[axis]) * distance_mm for axis in range(3)
+        )
+        swept_maximum = tuple(
+            maximum[axis] + abs(normal[axis]) * distance_mm for axis in range(3)
+        )
+        samples = [
+            tuple(
+                sum(weights[index] * points[index][axis] for index in range(3))
+                for axis in range(3)
+            )
+            for weights in sample_weights
+        ]
+        directions = (normal, tuple(-value for value in normal))
+        hit = False
+        for other in nearby:
+            if set(triangle_vertex_indices[candidate]) & set(triangle_vertex_indices[other]):
+                continue
+            other_minimum, other_maximum = bounds[other]
+            if any(
+                other_maximum[axis] < swept_minimum[axis] - 1e-9
+                or other_minimum[axis] > swept_maximum[axis] + 1e-9
+                for axis in range(3)
+            ):
+                continue
+            target = triangle_points[other]
+            for sample in samples:
+                if any(segment_hits_triangle(sample, direction, target) for direction in directions):
+                    hit = True
+                    break
+            if hit:
+                break
+        if hit:
+            flagged.add(candidate)
+
+    protected = {source_indices[index] for index in flagged}
+    area_by_index = {source_indices[index]: areas[index] for index in flagged}
+    return protected, area_by_index
+
+
+def _find_coincident_protection(
+    object_xml: bytes,
+    *,
+    max_gap_mm: float = 0.05,
+    angle_degrees: float = 2.0,
+    cell_size_mm: float = 1.0,
+    evidence_radius_mm: float = 2.0,
+) -> Tuple[Set[int], dict[int, float]]:
+    """Find flat surfaces of two disconnected pieces sitting right on top of
+    each other -- true coincident/z-fighting geometry, not merely close --
+    and never fuzz either one, for the whole flat surface each belongs to.
+
+    A third real defect category, distinct from both `_find_overlap_protection`
+    (disconnected pieces crossing at an angle) and `_find_nonmanifold_protection`
+    (a patch welded into the same shell). Here the two pieces are still
+    genuinely different shells, but instead of poking through each other at
+    an angle, one piece's flat face sits almost exactly on top of the
+    other's, which is what actually produces z-fighting/flicker in a 3D
+    viewer: the renderer cannot decide which coincident face is in front.
+    The real example that prompted this was a mortise joint's own flat
+    walls, a functional surface, not rough decoration -- deliberately
+    never meant to carry fuzzy texture at all.
+
+    Detection requires three things to agree, keeping this far more
+    selective than plain proximity: the two triangles are in different
+    shells (disconnected pieces, the same union-find used elsewhere in this
+    module), their normals are parallel or anti-parallel within
+    `angle_degrees` (genuinely coplanar, not just nearby), and the
+    perpendicular gap between them is tiny (`max_gap_mm`, far tighter than
+    `_find_overlap_protection`'s default -- this is near-zero coincidence,
+    not a loose touch).
+
+    Once a seed pair is found, protection is NOT limited to the seed
+    triangles themselves: each side's flat patch is grown outward from the
+    seed using the same area-weighted-average-normal region growth as
+    `_find_planar_protection`, so the whole coincident surface is protected,
+    not just the handful of triangles that happened to be close enough to
+    trigger detection. This naturally stays bounded where a straight-line
+    search radius (tried and rejected -- see `_find_overlap_protection`'s
+    docstring) was not: a flat patch stops growing at a real edge or corner,
+    so it cannot swallow an unrelated, differently-angled part of the same
+    piece the way widening a Euclidean radius did. Validated against a real
+    exported model section (wall + 7 loose stones): 6.2% of triangles
+    flagged across 137 separate grown patches, the largest only 275mm²,
+    not one patch swallowing the whole piece.
+
+    Geometry alone cannot tell "defect" apart from "fine": on the real
+    production model this also fired on several legitimately loose
+    decorative pieces (ledges/battlements) that were simply never welded
+    into the core and happen to sit flush against it -- by flatness and
+    coincidence alone, that looks identical to the mortise-wall defect.
+    The distinguishing evidence found by hand was that the model's loose
+    *decoration* is otherwise clean, manifold geometry, while the actual
+    defect pieces (the ones the user introduced while editing, e.g. the
+    "sliver-fan cluster") carry scarred, non-manifold geometry of their
+    own -- see `_find_nonmanifold_protection`. A seed pair is only kept
+    when a non-manifold edge exists within `evidence_radius_mm` of either
+    triangle. This is deliberately local, not "does either shell contain
+    a non-manifold edge anywhere": checking the whole shell would make
+    the huge core shell count as "has evidence" the moment it has even
+    one unrelated scar anywhere else on the model, which defeats the
+    point for every coincident pair that touches the core (nearly all of
+    them). A clean loose decoration's coincident face has no non-manifold
+    edge anywhere nearby and is left alone; actual debris does.
+    """
+    vertices = []
+    for match in VERTEX_RE.finditer(object_xml):
+        tag = match.group(0)
+        coords = [_simple_attribute(tag, axis) for axis in (b"x", b"y", b"z")]
+        if any(value is None for value in coords):
+            return set(), {}
+        vertices.append(tuple(float(value) for value in coords))
+    if not vertices:
+        return set(), {}
+
+    def position_key(index: int) -> Tuple[float, float, float]:
+        return tuple(round(value, 4) for value in vertices[index])
+
+    source_indices: List[int] = []
+    areas: List[float] = []
+    normals: List[Tuple[float, float, float]] = []
+    centroids: List[Tuple[float, float, float]] = []
+    triangle_points: List[Tuple[Tuple[float, float, float], ...]] = []
+    position_sets: List[frozenset] = []
+    adjacency: List[List[int]] = []
+    edge_owner: dict = {}
+
+    for triangle_index, match in enumerate(TRIANGLE_RE.finditer(object_xml)):
+        tag = match.group(0)
+        raw_indices = [_simple_attribute(tag, key) for key in (b"v1", b"v2", b"v3")]
+        if any(value is None for value in raw_indices):
+            continue
+        indices = tuple(int(value) for value in raw_indices)
+        if any(index < 0 or index >= len(vertices) for index in indices):
+            continue
+        a, b, c = (vertices[index] for index in indices)
+        ab = tuple(b[i] - a[i] for i in range(3))
+        ac = tuple(c[i] - a[i] for i in range(3))
+        cross = (
+            ab[1] * ac[2] - ab[2] * ac[1],
+            ab[2] * ac[0] - ab[0] * ac[2],
+            ab[0] * ac[1] - ab[1] * ac[0],
+        )
+        length = math.sqrt(sum(value * value for value in cross))
+        if length <= 1e-12:
+            continue
+        candidate = len(areas)
+        source_indices.append(triangle_index)
+        areas.append(length * 0.5)
+        normals.append(tuple(value / length for value in cross))
+        centroids.append(tuple((a[i] + b[i] + c[i]) / 3 for i in range(3)))
+        triangle_points.append((a, b, c))
+        position_sets.append(
+            frozenset((position_key(indices[0]), position_key(indices[1]), position_key(indices[2])))
+        )
+        adjacency.append([])
+        for edge in (
+            tuple(sorted((position_key(indices[0]), position_key(indices[1])))),
+            tuple(sorted((position_key(indices[1]), position_key(indices[2])))),
+            tuple(sorted((position_key(indices[2]), position_key(indices[0])))),
+        ):
+            neighbor = edge_owner.get(edge)
+            if neighbor is None:
+                edge_owner[edge] = candidate
+            else:
+                adjacency[neighbor].append(candidate)
+                adjacency[candidate].append(neighbor)
+
+    count = len(areas)
+    if count == 0:
+        return set(), {}
+
+    parent = list(range(count))
+
+    def find(index: int) -> int:
+        while parent[index] != index:
+            parent[index] = parent[parent[index]]
+            index = parent[index]
+        return index
+
+    def union(first: int, second: int) -> None:
+        root_first, root_second = find(first), find(second)
+        if root_first != root_second:
+            parent[root_first] = root_second
+
+    position_owner: dict = {}
+    for candidate, positions in enumerate(position_sets):
+        for position in positions:
+            owner = position_owner.get(position)
+            if owner is None:
+                position_owner[position] = candidate
+            else:
+                union(candidate, owner)
+
+    shell_of = [find(index) for index in range(count)]
+
+    nonmanifold_indices, _ = _find_nonmanifold_protection(object_xml)
+
+    def cell_index(point: Tuple[float, float, float]) -> Tuple[int, int, int]:
+        return (
+            math.floor(point[0] / cell_size_mm),
+            math.floor(point[1] / cell_size_mm),
+            math.floor(point[2] / cell_size_mm),
+        )
+
+    grid: dict = {}
+    triangle_cells: List[Set[Tuple[int, int, int]]] = []
+    for candidate, points in enumerate(triangle_points):
+        cells = {cell_index(point) for point in points}
+        triangle_cells.append(cells)
+        for cell in cells:
+            grid.setdefault(cell, []).append(candidate)
+
+    def neighbours(cells: Set[Tuple[int, int, int]]) -> Iterable[int]:
+        seen: Set[int] = set()
+        for cx, cy, cz in cells:
+            for dx in (-1, 0, 1):
+                for dy in (-1, 0, 1):
+                    for dz in (-1, 0, 1):
+                        for other in grid.get((cx + dx, cy + dy, cz + dz), ()):
+                            if other not in seen:
+                                seen.add(other)
+                                yield other
+
+    evidence_cell_radius = max(1, math.ceil(evidence_radius_mm / cell_size_mm))
+    evidence_grid: dict = {}
+    for candidate in range(count):
+        if source_indices[candidate] not in nonmanifold_indices:
+            continue
+        for cell in triangle_cells[candidate]:
+            evidence_grid.setdefault(cell, []).append(candidate)
+
+    def has_nearby_evidence(cells: Set[Tuple[int, int, int]]) -> bool:
+        for cx, cy, cz in cells:
+            for dx in range(-evidence_cell_radius, evidence_cell_radius + 1):
+                for dy in range(-evidence_cell_radius, evidence_cell_radius + 1):
+                    for dz in range(-evidence_cell_radius, evidence_cell_radius + 1):
+                        if evidence_grid.get((cx + dx, cy + dy, cz + dz)):
+                            return True
+        return False
+
+    cosine_limit = math.cos(math.radians(angle_degrees))
+    seeds: Set[int] = set()
+    for candidate in range(count):
+        shell = shell_of[candidate]
+        centroid = centroids[candidate]
+        for other in neighbours(triangle_cells[candidate]):
+            if other == candidate or shell_of[other] == shell:
+                continue
+            dot = sum(normals[candidate][axis] * normals[other][axis] for axis in range(3))
+            if abs(dot) < cosine_limit:
+                continue
+            reference_point = triangle_points[other][0]
+            relative = tuple(centroid[axis] - reference_point[axis] for axis in range(3))
+            gap = abs(sum(relative[axis] * normals[other][axis] for axis in range(3)))
+            if gap > max_gap_mm:
+                continue
+            if not has_nearby_evidence(triangle_cells[candidate]) and not has_nearby_evidence(
+                triangle_cells[other]
+            ):
+                continue
+            seeds.add(candidate)
+
+    if not seeds:
+        return set(), {}
+
+    visited = [False] * count
+    protected: Set[int] = set()
+    area_by_index: dict = {}
+    for seed in seeds:
+        if visited[seed]:
+            continue
+        members = [seed]
+        visited[seed] = True
+        sum_normal = [normals[seed][axis] * areas[seed] for axis in range(3)]
+        queue = deque([seed])
+        while queue:
+            current = queue.popleft()
+            for neighbor in adjacency[current]:
+                if visited[neighbor]:
+                    continue
+                length = math.sqrt(sum(value * value for value in sum_normal))
+                if length <= 1e-12:
+                    continue
+                reference = tuple(value / length for value in sum_normal)
+                dot = sum(reference[axis] * normals[neighbor][axis] for axis in range(3))
+                if dot < cosine_limit:
+                    continue
+                visited[neighbor] = True
+                members.append(neighbor)
+                queue.append(neighbor)
+                for axis in range(3):
+                    sum_normal[axis] += normals[neighbor][axis] * areas[neighbor]
+        for member in members:
+            protected.add(source_indices[member])
+            area_by_index[source_indices[member]] = areas[member]
+
     return protected, area_by_index
 
 
@@ -821,8 +2254,25 @@ def convert_model_xml(
     protect_planar: bool = False,
     planar_angle_degrees: float = 2.0,
     planar_minimum_area_mm2: float = 20.0,
+    planar_compact_strip_minimum_area_mm2: Optional[float] = None,
+    planar_coplanar_lane_minimum_patch_area_mm2: Optional[float] = None,
+    planar_coplanar_lane_axis: Optional[
+        Tuple[float, float, float] | Sequence[Tuple[float, float, float]]
+    ] = None,
+    planar_layered_feature_maximum_depth_mm: Optional[float] = None,
+    protect_connected_coplanar: bool = False,
+    connected_coplanar_angle_degrees: float = 0.5,
+    connected_coplanar_plane_tolerance_mm: float = 0.02,
+    connected_coplanar_minimum_short_span_mm: float = 0.0,
+    connected_coplanar_minimum_long_span_mm: float = 0.0,
+    connected_coplanar_satellite_gap_mm: float = 0.0,
+    protect_flat_contact: bool = False,
+    protect_fuzz_envelope: bool = False,
+    fuzz_envelope_distance_mm: float = 0.25,
+    fuzz_envelope_contact_neighbor_rings: int = 1,
     protect_overlap: bool = True,
     protect_nonmanifold: bool = True,
+    protect_coincident: bool = False,
     report: Optional[ConversionReport] = None,
 ) -> Tuple[bytes, bool]:
     """Convert colour attributes in one 3MF model XML member."""
@@ -832,8 +2282,11 @@ def convert_model_xml(
     def convert_triangle_tags(
         xml: bytes,
         planar_protected: Set[int],
+        flat_contact_protected: dict[int, float],
+        fuzz_envelope_protected: dict[int, float],
         overlap_protected: dict[int, float],
         nonmanifold_protected: dict[int, float],
+        coincident_protected: dict[int, float],
     ) -> bytes:
         triangle_index = -1
 
@@ -854,6 +2307,16 @@ def convert_model_xml(
                 if state > 0 and (slots is None or state in slots):
                     report.selected_leaf_counts[state] += 1
 
+            if triangle_index in flat_contact_protected:
+                report.flat_contact_triangles_protected += 1
+                report.flat_contact_area_protected_mm2 += flat_contact_protected[triangle_index]
+                return tag
+
+            if triangle_index in fuzz_envelope_protected:
+                report.fuzz_envelope_triangles_protected += 1
+                report.fuzz_envelope_area_protected_mm2 += fuzz_envelope_protected[triangle_index]
+                return tag
+
             if triangle_index in overlap_protected:
                 report.overlap_triangles_protected += 1
                 report.overlap_area_protected_mm2 += overlap_protected[triangle_index]
@@ -862,6 +2325,11 @@ def convert_model_xml(
             if triangle_index in nonmanifold_protected:
                 report.nonmanifold_triangles_protected += 1
                 report.nonmanifold_area_protected_mm2 += nonmanifold_protected[triangle_index]
+                return tag
+
+            if triangle_index in coincident_protected:
+                report.coincident_triangles_protected += 1
+                report.coincident_area_protected_mm2 += coincident_protected[triangle_index]
                 return tag
 
             if triangle_index in planar_protected:
@@ -896,8 +2364,16 @@ def convert_model_xml(
 
         return TRIANGLE_RE.sub(replace_tag, xml)
 
-    if not protect_planar and not protect_overlap and not protect_nonmanifold:
-        return convert_triangle_tags(data, set(), {}, {}), changed
+    if (
+        not protect_planar
+        and not protect_connected_coplanar
+        and not protect_flat_contact
+        and not protect_fuzz_envelope
+        and not protect_overlap
+        and not protect_nonmanifold
+        and not protect_coincident
+    ):
+        return convert_triangle_tags(data, set(), {}, {}, {}, {}, {}), changed
 
     found_object = False
 
@@ -905,29 +2381,129 @@ def convert_model_xml(
         nonlocal found_object
         found_object = True
         object_xml = match.group(0)
+        use_rust_mesh_protection = bool(
+            _rust_engine is not None
+            and protect_flat_contact
+            and protect_fuzz_envelope
+        )
+        use_rust_full_mesh_protection = bool(
+            use_rust_mesh_protection
+            and hasattr(_rust_engine, "find_mesh_protection")
+            and (protect_planar or protect_connected_coplanar)
+            and planar_coplanar_lane_minimum_patch_area_mm2 is None
+            and planar_coplanar_lane_axis is None
+            and planar_layered_feature_maximum_depth_mm is None
+        )
+        shared_geometry = (
+            _parse_mesh_geometry(object_xml, slots)
+            if (
+                (
+                    (protect_planar or protect_connected_coplanar)
+                    and not use_rust_full_mesh_protection
+                )
+                or (
+                    not use_rust_mesh_protection
+                    and (protect_flat_contact or protect_fuzz_envelope)
+                )
+            )
+            else None
+        )
         planar_protected: Set[int] = set()
-        if protect_planar:
+        flat_contact_protected: dict[int, float] = {}
+        fuzz_envelope_protected: dict[int, float] = {}
+        if use_rust_full_mesh_protection:
+            (
+                rust_planar,
+                patches,
+                area,
+                rust_contacts,
+                rust_envelope,
+            ) = _rust_engine.find_mesh_protection(
+                object_xml,
+                sorted(slots) if slots is not None else None,
+                angle_degrees=planar_angle_degrees,
+                minimum_area_mm2=planar_minimum_area_mm2,
+                compact_strip_minimum_area_mm2=planar_compact_strip_minimum_area_mm2,
+                protect_connected_coplanar=protect_connected_coplanar,
+                connected_coplanar_angle_degrees=connected_coplanar_angle_degrees,
+                connected_coplanar_plane_tolerance_mm=connected_coplanar_plane_tolerance_mm,
+                connected_coplanar_minimum_short_span_mm=connected_coplanar_minimum_short_span_mm,
+                connected_coplanar_minimum_long_span_mm=connected_coplanar_minimum_long_span_mm,
+                connected_coplanar_satellite_gap_mm=connected_coplanar_satellite_gap_mm,
+                distance_mm=fuzz_envelope_distance_mm,
+                contact_neighbor_rings=fuzz_envelope_contact_neighbor_rings,
+            )
+            planar_protected = set(rust_planar)
+            flat_contact_protected = dict(rust_contacts)
+            fuzz_envelope_protected = dict(rust_envelope)
+            report.planar_patches_protected += patches
+            report.planar_area_protected_mm2 += area
+        elif protect_planar or protect_connected_coplanar:
             planar_protected, patches, area = _find_planar_protection(
                 object_xml,
                 slots,
                 angle_degrees=planar_angle_degrees,
                 minimum_area_mm2=planar_minimum_area_mm2,
+                compact_strip_minimum_area_mm2=planar_compact_strip_minimum_area_mm2,
+                coplanar_lane_minimum_patch_area_mm2=planar_coplanar_lane_minimum_patch_area_mm2,
+                coplanar_lane_axis=planar_coplanar_lane_axis,
+                layered_feature_maximum_depth_mm=planar_layered_feature_maximum_depth_mm,
+                protect_connected_coplanar=protect_connected_coplanar,
+                connected_coplanar_angle_degrees=connected_coplanar_angle_degrees,
+                connected_coplanar_plane_tolerance_mm=connected_coplanar_plane_tolerance_mm,
+                connected_coplanar_minimum_short_span_mm=connected_coplanar_minimum_short_span_mm,
+                connected_coplanar_minimum_long_span_mm=connected_coplanar_minimum_long_span_mm,
+                connected_coplanar_satellite_gap_mm=connected_coplanar_satellite_gap_mm,
+                geometry=shared_geometry,
             )
             report.planar_patches_protected += patches
             report.planar_area_protected_mm2 += area
+        if use_rust_mesh_protection and not use_rust_full_mesh_protection:
+            rust_contacts, rust_envelope = (
+                _rust_engine.find_flat_contact_and_fuzz_envelope(
+                    object_xml,
+                    sorted(slots) if slots is not None else None,
+                    fuzz_envelope_distance_mm,
+                    fuzz_envelope_contact_neighbor_rings,
+                )
+            )
+            flat_contact_protected = dict(rust_contacts)
+            fuzz_envelope_protected = dict(rust_envelope)
+        elif protect_flat_contact and not use_rust_full_mesh_protection:
+            _flat_contact_indices, flat_contact_protected = _find_flat_contact_protection(
+                object_xml, slots, geometry=shared_geometry
+            )
+        if protect_fuzz_envelope and not use_rust_mesh_protection:
+            _fuzz_envelope_indices, fuzz_envelope_protected = _find_fuzz_envelope_protection(
+                object_xml,
+                slots,
+                distance_mm=fuzz_envelope_distance_mm,
+                contact_seed_indices=_flat_contact_indices if protect_flat_contact else set(),
+                contact_neighbor_rings=fuzz_envelope_contact_neighbor_rings,
+                geometry=shared_geometry,
+            )
         overlap_protected: dict[int, float] = {}
         if protect_overlap:
             _overlap_indices, overlap_protected = _find_overlap_protection(object_xml)
         nonmanifold_protected: dict[int, float] = {}
         if protect_nonmanifold:
             _nonmanifold_indices, nonmanifold_protected = _find_nonmanifold_protection(object_xml)
+        coincident_protected: dict[int, float] = {}
+        if protect_coincident:
+            _coincident_indices, coincident_protected = _find_coincident_protection(object_xml)
         return convert_triangle_tags(
-            object_xml, planar_protected, overlap_protected, nonmanifold_protected
+            object_xml,
+            planar_protected,
+            flat_contact_protected,
+            fuzz_envelope_protected,
+            overlap_protected,
+            nonmanifold_protected,
+            coincident_protected,
         )
 
     converted = OBJECT_RE.sub(replace_object, data)
     if not found_object:
-        converted = convert_triangle_tags(data, set(), {}, {})
+        converted = convert_triangle_tags(data, set(), {}, {}, {}, {}, {})
     return converted, changed
 
 
@@ -1161,8 +2737,25 @@ def convert_3mf(
     protect_planar: bool = False,
     planar_angle_degrees: float = 2.0,
     planar_minimum_area_mm2: float = 20.0,
+    planar_compact_strip_minimum_area_mm2: Optional[float] = None,
+    planar_coplanar_lane_minimum_patch_area_mm2: Optional[float] = None,
+    planar_coplanar_lane_axis: Optional[
+        Tuple[float, float, float] | Sequence[Tuple[float, float, float]]
+    ] = None,
+    planar_layered_feature_maximum_depth_mm: Optional[float] = None,
+    protect_connected_coplanar: bool = False,
+    connected_coplanar_angle_degrees: float = 0.5,
+    connected_coplanar_plane_tolerance_mm: float = 0.02,
+    connected_coplanar_minimum_short_span_mm: float = 0.0,
+    connected_coplanar_minimum_long_span_mm: float = 0.0,
+    connected_coplanar_satellite_gap_mm: float = 0.0,
+    protect_flat_contact: bool = False,
+    protect_fuzz_envelope: bool = False,
+    fuzz_envelope_distance_mm: float = 0.25,
+    fuzz_envelope_contact_neighbor_rings: int = 1,
     protect_overlap: bool = True,
     protect_nonmanifold: bool = True,
+    protect_coincident: bool = False,
     single_colour: bool = False,
     single_colour_slot: int = 1,
     single_spool_segmented: bool = False,
@@ -1237,8 +2830,23 @@ def convert_3mf(
                             protect_planar=protect_planar,
                             planar_angle_degrees=planar_angle_degrees,
                             planar_minimum_area_mm2=planar_minimum_area_mm2,
+                            planar_compact_strip_minimum_area_mm2=planar_compact_strip_minimum_area_mm2,
+                            planar_coplanar_lane_minimum_patch_area_mm2=planar_coplanar_lane_minimum_patch_area_mm2,
+                            planar_coplanar_lane_axis=planar_coplanar_lane_axis,
+                            planar_layered_feature_maximum_depth_mm=planar_layered_feature_maximum_depth_mm,
+                            protect_connected_coplanar=protect_connected_coplanar,
+                            connected_coplanar_angle_degrees=connected_coplanar_angle_degrees,
+                            connected_coplanar_plane_tolerance_mm=connected_coplanar_plane_tolerance_mm,
+                            connected_coplanar_minimum_short_span_mm=connected_coplanar_minimum_short_span_mm,
+                            connected_coplanar_minimum_long_span_mm=connected_coplanar_minimum_long_span_mm,
+                            connected_coplanar_satellite_gap_mm=connected_coplanar_satellite_gap_mm,
+                            protect_flat_contact=protect_flat_contact,
+                            protect_fuzz_envelope=protect_fuzz_envelope,
+                            fuzz_envelope_distance_mm=fuzz_envelope_distance_mm,
+                            fuzz_envelope_contact_neighbor_rings=fuzz_envelope_contact_neighbor_rings,
                             protect_overlap=protect_overlap,
                             protect_nonmanifold=protect_nonmanifold,
+                            protect_coincident=protect_coincident,
                             report=report,
                         )
                         report.model_files_modified += int(modified)
@@ -1411,6 +3019,20 @@ def format_report(report: ConversionReport) -> str:
             else ""
         )
         + (
+            f"\nSkipped fuzzing {report.flat_contact_triangles_protected:,} triangle(s) "
+            f"({report.flat_contact_area_protected_mm2:,.1f} mm²) whose faces lie flat "
+            f"against another surface."
+            if report.flat_contact_triangles_protected
+            else ""
+        )
+        + (
+            f"\nSkipped fuzzing {report.fuzz_envelope_triangles_protected:,} triangle(s) "
+            f"({report.fuzz_envelope_area_protected_mm2:,.1f} mm²) whose fuzzy "
+            f"displacement could intersect another surface."
+            if report.fuzz_envelope_triangles_protected
+            else ""
+        )
+        + (
             f"\nSkipped fuzzing {report.overlap_triangles_protected:,} triangle(s) "
             f"({report.overlap_area_protected_mm2:,.1f} mm²) found sitting flush against "
             f"disconnected/overlapping geometry."
@@ -1422,6 +3044,13 @@ def format_report(report: ConversionReport) -> str:
             f"({report.nonmanifold_area_protected_mm2:,.1f} mm²) found touching a "
             f"non-manifold mesh edge."
             if report.nonmanifold_triangles_protected
+            else ""
+        )
+        + (
+            f"\nSkipped fuzzing {report.coincident_triangles_protected:,} triangle(s) "
+            f"({report.coincident_area_protected_mm2:,.1f} mm²) found coincident with "
+            f"another piece's flat surface."
+            if report.coincident_triangles_protected
             else ""
         )
         + (
@@ -1504,6 +3133,13 @@ def build_parser() -> argparse.ArgumentParser:
         "(default: skip fuzzing them, since they are mesh debris rather than real paint)",
     )
     parser.add_argument(
+        "--protect-coincident",
+        action="store_true",
+        help="do not fuzz flat surfaces that sit coincident with another piece's flat surface "
+        "(default: off -- validated well on a hand-picked test case, but over-fires on complex "
+        "models with many legitimately-touching mechanical parts; opt in and check the result)",
+    )
+    parser.add_argument(
         "--single-colour",
         action="store_true",
         help="retain fuzzy skin but remove face colours and remap every part to filament 1",
@@ -1527,6 +3163,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             protect_planar=args.protect_planar,
             protect_overlap=args.protect_overlap,
             protect_nonmanifold=args.protect_nonmanifold,
+            protect_coincident=args.protect_coincident,
             single_colour=args.single_colour,
             single_spool_segmented=args.single_spool_segmented,
         )

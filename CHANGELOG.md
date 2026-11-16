@@ -10,6 +10,118 @@ The version bump happens in the same commit as the change it describes, not as a
 separate afterthought -- that's what let `APP_VERSION` drift and sit at 0.2.6
 through several real changes before this file existed.
 
+## 0.11.2
+
+- Moved the normal smooth-surface preparation geometry into the bundled Rust
+  engine and parse each mesh only once. On the validated Timer Tower project,
+  preparation dropped from about 3 minutes 48 seconds to 29 seconds.
+- Kept the protected triangle sets, preparation counts, defaults, and prepared
+  project output identical to 0.11.1.
+- Retained the Python implementation as a compatibility fallback when the Rust
+  engine is unavailable or older expert-only classifiers are requested.
+
+## 0.11.1
+
+- Bundled the compatible Rust G-code engine in the Windows app. The validated
+  Timer Tower post-processing pass dropped from about 11 minutes to 84 seconds;
+  Bambu Studio slicing remains a separate external cost.
+- Added phase timings to the print-ready completion report so slicing and
+  FuzzyPaint processing costs can be distinguished directly.
+- Added a release self-test that fails if the packaged Rust engine is missing.
+- Kept geometry classification, smooth-surface protection, and print settings
+  unchanged from 0.11.0.
+
+## 0.11.0
+
+- Added the validated universal smooth-surface protection profile to the GUI:
+  large and compact planar patches, disconnected coplanar surface groups, flat
+  contacts, and the neighbouring fuzz envelope are protected together when
+  **Keep large flat areas smooth** is enabled.
+- Changed the default minimum protected flat area to 90 mm². The validated
+  compact-strip rule still protects narrow fitting surfaces from 30 mm².
+- Changed the older overlap and non-manifold debris checks to opt-in defaults;
+  the universal profile does not require them and they add substantial runtime
+  on large projects.
+- Improved large-model preparation performance by sharing parsed mesh geometry
+  between protection passes and avoiding repeated spatial searches.
+- Added a packaged-app self-test mode used to verify Windows release builds.
+
+## 0.10.2
+
+- Changed: `_find_coincident_protection` now requires corroborating
+  evidence before protecting a coincident pair, not flatness+coincidence
+  alone. Of the two shells in a candidate pair, the smaller ("loose
+  piece") side must itself contain a non-manifold edge somewhere
+  (`_find_nonmanifold_protection`'s signal) -- the fingerprint of
+  scarred-in debris, not of ordinary clean decoration. This targets the
+  0.10.1 regression directly: the legitimately-loose decorative ledges
+  that check wrongly caught are clean, well-formed meshes with no
+  non-manifold edges of their own, while the actual mortise-joint debris
+  (self-introduced while editing, per the user) is not. Still gated
+  behind `--protect-coincident` (off by default) while this narrower rule
+  gets validated against the real production model again.
+
+## 0.10.1
+
+- Changed: 0.10.0's coincident-surface check defaulted to on, validated only
+  against a hand-picked test crop (one wall + 7 loose stones). Run for
+  real against the full ~829,000-triangle production model, it correctly
+  fixed the mortise-joint case it was built for, but also removed fuzz
+  from several legitimately-touching mechanical parts elsewhere on the
+  model (lever arms and ledges resting flat against the tower body --
+  confirmed directly in Bambu Studio's sliced preview). A model with this
+  many separately-kitbashed functional parts has far more "two flat
+  surfaces happen to touch" pairs than a small test piece ever showed, and
+  not all of them are defects. Now off by default (`--protect-coincident`
+  opt-in, was `--no-protect-coincident` opt-out); the GUI checkbox is
+  unchecked by default and labelled experimental. The detection logic
+  itself is unchanged -- this is a default-safety change, not a bug fix in
+  the check.
+
+## 0.10.0
+
+- Added: a third mesh-debris protection, `_find_coincident_protection`,
+  covering a real defect category neither existing check reaches -- two
+  disconnected pieces whose flat faces sit almost exactly on top of each
+  other (true coincident geometry, the actual cause of z-fighting/flicker
+  in a 3D viewer), as opposed to `_find_overlap_protection`'s "crossing at
+  an angle" or `_find_nonmanifold_protection`'s "welded into the same
+  shell". The real case this was built for: a mortise joint's own flat
+  walls, a functional assembly surface never meant to carry rough texture,
+  confirmed directly in Bambu Studio's sliced preview. Detection requires
+  the two triangles to be in different shells, near-coplanar (within
+  `angle_degrees`, default 2.0) and within a tight `max_gap_mm` (default
+  0.05 -- true near-zero coincidence, much tighter than the 0.3mm used for
+  plain touching). Once found, protection grows to each side's whole
+  connected flat patch (the same region-growing used by
+  `_find_planar_protection`), not just the seed triangles -- this stays
+  naturally bounded, because a flat patch stops growing at a real edge or
+  corner, unlike the straight-line radius tried and reverted in 0.9.0.
+  Validated against a real exported model section (wall + 7 loose stones):
+  6.2% of triangles flagged across 137 separate grown patches, largest
+  only 275mm². New `--no-protect-coincident` CLI flag and GUI checkbox,
+  default on, matching the existing overlap/non-manifold checks.
+
+## 0.9.0
+
+- Attempted, then reverted to a no-op default: extending the disconnected-
+  collision check (0.8.0) to protect deeper into a confirmed-colliding
+  chunk, not just the thin first-contact seam. The idea held up on paper
+  (real stones measured 2.2-2.5mm embedded, not sub-millimetre, so a
+  0.3mm-gap seam alone left most of the intrusion still fuzzed) but a
+  straight-line "within depth_mm of the other shell" radius does not
+  isolate just the embedded tip on a real kitbashed rock wall -- rocks
+  sit close to their own neighbours across most of their own surface, so
+  `depth_mm=1.0` already protected 34.6% of a real 30,748-triangle test
+  piece, `depth_mm=3.0` protected 76.6%, confirmed by direct visual
+  inspection in Bambu Studio's sliced preview as real fuzz loss on
+  surfaces that were never part of the defect. `_find_overlap_protection`
+  keeps the `depth_mm` parameter and its two-pass structure (a future
+  geodesic/surface-distance version could use it correctly), but it now
+  defaults to equal `max_gap_mm`, making the second pass a no-op by
+  default -- the shipped behaviour is back to exactly 0.8.0's thin-seam
+  protection.
+
 ## 0.8.2
 
 - Added: GUI checkboxes on the Prepare tab to disable 0.8.0's disconnected-

@@ -14,6 +14,7 @@ from fuzzypaint import (
     convert_3mf,
     configure_project_for_slicing,
     convert_model_xml,
+    _find_overlap_protection,
     decode_paint_stream,
     encode_paint_stream,
     leaf_states,
@@ -92,6 +93,117 @@ class XmlConversionTests(unittest.TestCase):
         self.assertFalse(changed)
         self.assertEqual(converted, xml)
 
+    def test_flat_contact_protects_actual_overlapping_face_footprint(self):
+        # The small triangle lies against the middle of the painted face. None
+        # of its vertices coincide with the painted triangle's vertices.
+        xml = b'''<object id="1"><mesh><vertices>
+          <vertex x="0" y="0" z="0"/><vertex x="10" y="0" z="0"/>
+          <vertex x="0" y="10" z="0"/>
+          <vertex x="2" y="2" z="0.02"/><vertex x="4" y="2" z="0.02"/>
+          <vertex x="2" y="4" z="0.02"/>
+        </vertices><triangles>
+          <triangle v1="0" v2="1" v3="2" paint_color="8"/>
+          <triangle v1="3" v2="4" v3="5"/>
+        </triangles></mesh></object>'''
+        report = ConversionReport()
+        converted, changed = convert_model_xml(
+            xml,
+            slots={2},
+            protect_flat_contact=True,
+            protect_overlap=False,
+            protect_nonmanifold=False,
+            report=report,
+        )
+        self.assertFalse(changed)
+        self.assertNotIn(b"paint_fuzzy_skin", converted)
+        self.assertEqual(report.flat_contact_triangles_protected, 1)
+        self.assertAlmostEqual(report.flat_contact_area_protected_mm2, 50.0)
+
+    def test_flat_contact_does_not_treat_shared_edge_as_surface_overlap(self):
+        xml = b'''<object id="1"><mesh><vertices>
+          <vertex x="0" y="0" z="0"/><vertex x="2" y="0" z="0"/>
+          <vertex x="0" y="2" z="0"/><vertex x="2" y="2" z="0"/>
+        </vertices><triangles>
+          <triangle v1="0" v2="1" v3="2" paint_color="8"/>
+          <triangle v1="1" v2="3" v3="2"/>
+        </triangles></mesh></object>'''
+        converted, changed = convert_model_xml(
+            xml,
+            slots={2},
+            protect_flat_contact=True,
+            protect_overlap=False,
+            protect_nonmanifold=False,
+        )
+        self.assertTrue(changed)
+        self.assertIn(b'paint_fuzzy_skin="4"', converted)
+
+    def test_flat_contact_rejects_parallel_faces_outside_gap(self):
+        xml = b'''<object id="1"><mesh><vertices>
+          <vertex x="0" y="0" z="0"/><vertex x="4" y="0" z="0"/>
+          <vertex x="0" y="4" z="0"/>
+          <vertex x="1" y="1" z="0.10"/><vertex x="2" y="1" z="0.10"/>
+          <vertex x="1" y="2" z="0.10"/>
+        </vertices><triangles>
+          <triangle v1="0" v2="1" v3="2" paint_color="8"/>
+          <triangle v1="3" v2="4" v3="5"/>
+        </triangles></mesh></object>'''
+        converted, changed = convert_model_xml(
+            xml,
+            slots={2},
+            protect_flat_contact=True,
+            protect_overlap=False,
+            protect_nonmanifold=False,
+        )
+        self.assertTrue(changed)
+        self.assertIn(b'paint_fuzzy_skin="4"', converted)
+
+    def test_fuzz_envelope_protects_angled_face_that_can_poke_through_wall(self):
+        xml = b'''<object id="1"><mesh><vertices>
+          <vertex x="0" y="-2" z="-2"/><vertex x="0" y="2" z="-2"/>
+          <vertex x="0" y="0" z="2"/>
+          <vertex x="0.02" y="-0.5" z="-0.5"/>
+          <vertex x="0.02" y="0.5" z="-0.5"/>
+          <vertex x="0.02" y="0" z="0.5"/>
+          <vertex x="0.20" y="0" z="0.5"/>
+        </vertices><triangles>
+          <triangle v1="0" v2="1" v3="2"/>
+          <triangle v1="3" v2="4" v3="5" paint_color="8"/>
+          <triangle v1="3" v2="4" v3="6" paint_color="8"/>
+        </triangles></mesh></object>'''
+        report = ConversionReport()
+        converted, changed = convert_model_xml(
+            xml,
+            slots={2},
+            protect_flat_contact=True,
+            protect_fuzz_envelope=True,
+            fuzz_envelope_distance_mm=0.25,
+            protect_overlap=False,
+            protect_nonmanifold=False,
+            report=report,
+        )
+        self.assertFalse(changed)
+        self.assertNotIn(b"paint_fuzzy_skin", converted)
+        self.assertEqual(report.flat_contact_triangles_protected, 1)
+        self.assertEqual(report.fuzz_envelope_triangles_protected, 1)
+
+    def test_fuzz_envelope_leaves_unobstructed_face_eligible(self):
+        xml = b'''<object id="1"><mesh><vertices>
+          <vertex x="0" y="0" z="0"/><vertex x="2" y="0" z="0"/>
+          <vertex x="0" y="2" z="0"/>
+        </vertices><triangles>
+          <triangle v1="0" v2="1" v3="2" paint_color="8"/>
+        </triangles></mesh></object>'''
+        converted, changed = convert_model_xml(
+            xml,
+            slots={2},
+            protect_fuzz_envelope=True,
+            fuzz_envelope_distance_mm=0.25,
+            protect_overlap=False,
+            protect_nonmanifold=False,
+        )
+        self.assertTrue(changed)
+        self.assertIn(b'paint_fuzzy_skin="4"', converted)
+
     def test_planar_protection_withholds_large_coplanar_patch(self):
         xml = b'''<model><resources><object id="1"><mesh>
         <vertices>
@@ -121,6 +233,378 @@ class XmlConversionTests(unittest.TestCase):
         converted, changed = convert_model_xml(xml, slots={2}, protect_planar=True)
         self.assertTrue(changed)
         self.assertIn(b'paint_fuzzy_skin="4"', converted)
+
+    def test_connected_coplanar_rule_protects_small_two_triangle_face(self):
+        xml = b'''<object id="1"><mesh><vertices>
+          <vertex x="0" y="0" z="0"/><vertex x="2" y="0" z="0"/>
+          <vertex x="2" y="2" z="0"/><vertex x="0" y="2" z="0"/>
+        </vertices><triangles>
+          <triangle v1="0" v2="1" v3="2" paint_color="8"/>
+          <triangle v1="0" v2="2" v3="3" paint_color="8"/>
+        </triangles></mesh></object>'''
+        converted, changed = convert_model_xml(
+            xml,
+            slots={2},
+            protect_connected_coplanar=True,
+            protect_overlap=False,
+            protect_nonmanifold=False,
+        )
+        self.assertFalse(changed)
+        self.assertNotIn(b"paint_fuzzy_skin", converted)
+
+    def test_connected_coplanar_span_gate_rejects_small_face(self):
+        xml = b'''<object id="1"><mesh><vertices>
+          <vertex x="0" y="0" z="0"/><vertex x="2" y="0" z="0"/>
+          <vertex x="2" y="2" z="0"/><vertex x="0" y="2" z="0"/>
+        </vertices><triangles>
+          <triangle v1="0" v2="1" v3="2" paint_color="8"/>
+          <triangle v1="0" v2="2" v3="3" paint_color="8"/>
+        </triangles></mesh></object>'''
+        converted, changed = convert_model_xml(
+            xml,
+            slots={2},
+            protect_connected_coplanar=True,
+            connected_coplanar_minimum_short_span_mm=3.0,
+            connected_coplanar_minimum_long_span_mm=8.0,
+            protect_overlap=False,
+            protect_nonmanifold=False,
+        )
+        self.assertTrue(changed)
+        self.assertEqual(converted.count(b"paint_fuzzy_skin"), 2)
+
+    def test_connected_coplanar_span_gate_accepts_slot_sized_face(self):
+        xml = b'''<object id="1"><mesh><vertices>
+          <vertex x="0" y="0" z="0"/><vertex x="6" y="0" z="0"/>
+          <vertex x="6" y="12" z="0"/><vertex x="0" y="12" z="0"/>
+        </vertices><triangles>
+          <triangle v1="0" v2="1" v3="2" paint_color="8"/>
+          <triangle v1="0" v2="2" v3="3" paint_color="8"/>
+        </triangles></mesh></object>'''
+        converted, changed = convert_model_xml(
+            xml,
+            slots={2},
+            protect_connected_coplanar=True,
+            connected_coplanar_minimum_short_span_mm=3.0,
+            connected_coplanar_minimum_long_span_mm=8.0,
+            protect_overlap=False,
+            protect_nonmanifold=False,
+        )
+        self.assertFalse(changed)
+        self.assertNotIn(b"paint_fuzzy_skin", converted)
+
+    def test_connected_coplanar_protects_nearby_fragment_of_qualifying_plane(self):
+        xml = b'''<object id="1"><mesh><vertices>
+          <vertex x="0" y="0" z="0"/><vertex x="6" y="0" z="0"/>
+          <vertex x="6" y="12" z="0"/><vertex x="0" y="12" z="0"/>
+          <vertex x="6.2" y="5" z="0"/><vertex x="7.2" y="5" z="0"/>
+          <vertex x="7.2" y="6" z="0"/><vertex x="6.2" y="6" z="0"/>
+        </vertices><triangles>
+          <triangle v1="0" v2="1" v3="2" paint_color="8"/>
+          <triangle v1="0" v2="2" v3="3" paint_color="8"/>
+          <triangle v1="4" v2="5" v3="6" paint_color="8"/>
+          <triangle v1="4" v2="6" v3="7" paint_color="8"/>
+        </triangles></mesh></object>'''
+        converted, changed = convert_model_xml(
+            xml,
+            slots={2},
+            protect_connected_coplanar=True,
+            connected_coplanar_minimum_short_span_mm=3.0,
+            connected_coplanar_minimum_long_span_mm=8.0,
+            connected_coplanar_satellite_gap_mm=0.25,
+            protect_overlap=False,
+            protect_nonmanifold=False,
+        )
+        self.assertFalse(changed)
+        self.assertNotIn(b"paint_fuzzy_skin", converted)
+
+    def test_connected_coplanar_rule_rejects_folded_pair(self):
+        xml = b'''<object id="1"><mesh><vertices>
+          <vertex x="0" y="0" z="0"/><vertex x="2" y="0" z="0"/>
+          <vertex x="0" y="2" z="0"/><vertex x="0" y="2" z="1"/>
+        </vertices><triangles>
+          <triangle v1="0" v2="1" v3="2" paint_color="8"/>
+          <triangle v1="0" v2="2" v3="3" paint_color="8"/>
+        </triangles></mesh></object>'''
+        converted, changed = convert_model_xml(
+            xml,
+            slots={2},
+            protect_connected_coplanar=True,
+            protect_overlap=False,
+            protect_nonmanifold=False,
+        )
+        self.assertTrue(changed)
+        self.assertEqual(converted.count(b"paint_fuzzy_skin"), 2)
+
+    def test_connected_coplanar_rule_rejects_isolated_triangle(self):
+        xml = b'''<object id="1"><mesh><vertices>
+          <vertex x="0" y="0" z="0"/><vertex x="2" y="0" z="0"/>
+          <vertex x="0" y="2" z="0"/>
+        </vertices><triangles>
+          <triangle v1="0" v2="1" v3="2" paint_color="8"/>
+        </triangles></mesh></object>'''
+        converted, changed = convert_model_xml(
+            xml,
+            slots={2},
+            protect_connected_coplanar=True,
+            protect_overlap=False,
+            protect_nonmanifold=False,
+        )
+        self.assertTrue(changed)
+        self.assertIn(b'paint_fuzzy_skin="4"', converted)
+
+    def test_planar_protection_can_opt_in_compact_vertical_strip(self):
+        xml = b'''<object id="1"><mesh><vertices>
+          <vertex x="0" y="0" z="0"/><vertex x="0" y="3" z="0"/>
+          <vertex x="0" y="3" z="13"/><vertex x="0" y="0" z="13"/>
+        </vertices><triangles>
+          <triangle v1="0" v2="1" v3="2" paint_color="8"/>
+          <triangle v1="0" v2="2" v3="3" paint_color="8"/>
+        </triangles></mesh></object>'''
+        report = ConversionReport()
+        converted, changed = convert_model_xml(
+            xml,
+            slots={2},
+            protect_planar=True,
+            planar_minimum_area_mm2=100.0,
+            planar_compact_strip_minimum_area_mm2=30.0,
+            report=report,
+        )
+        self.assertFalse(changed)
+        self.assertNotIn(b"paint_fuzzy_skin", converted)
+        self.assertEqual(report.planar_patches_protected, 1)
+        self.assertAlmostEqual(report.planar_area_protected_mm2, 39.0)
+
+    def test_planar_compact_strip_exception_rejects_horizontal_patch(self):
+        xml = b'''<object id="1"><mesh><vertices>
+          <vertex x="0" y="0" z="0"/><vertex x="13" y="0" z="0"/>
+          <vertex x="13" y="3" z="0"/><vertex x="0" y="3" z="0"/>
+        </vertices><triangles>
+          <triangle v1="0" v2="1" v3="2" paint_color="8"/>
+          <triangle v1="0" v2="2" v3="3" paint_color="8"/>
+        </triangles></mesh></object>'''
+        converted, changed = convert_model_xml(
+            xml,
+            slots={2},
+            protect_planar=True,
+            planar_minimum_area_mm2=100.0,
+            planar_compact_strip_minimum_area_mm2=30.0,
+        )
+        self.assertTrue(changed)
+        self.assertEqual(converted.count(b"paint_fuzzy_skin"), 2)
+
+    def test_planar_protection_can_group_aligned_coplanar_lane(self):
+        xml = b'''<object id="1"><mesh><vertices>
+          <vertex x="0" y="0" z="0"/><vertex x="0" y="3" z="0"/>
+          <vertex x="0" y="3" z="12"/><vertex x="0" y="0" z="12"/>
+          <vertex x="0" y="0" z="17"/><vertex x="0" y="3" z="17"/>
+          <vertex x="0" y="3" z="29"/><vertex x="0" y="0" z="29"/>
+          <vertex x="0" y="0" z="34"/><vertex x="0" y="3" z="34"/>
+          <vertex x="0" y="3" z="46"/><vertex x="0" y="0" z="46"/>
+        </vertices><triangles>
+          <triangle v1="0" v2="1" v3="2" paint_color="8"/>
+          <triangle v1="0" v2="2" v3="3" paint_color="8"/>
+          <triangle v1="4" v2="5" v3="6" paint_color="8"/>
+          <triangle v1="4" v2="6" v3="7" paint_color="8"/>
+          <triangle v1="8" v2="9" v3="10" paint_color="8"/>
+          <triangle v1="8" v2="10" v3="11" paint_color="8"/>
+        </triangles></mesh></object>'''
+        report = ConversionReport()
+        converted, changed = convert_model_xml(
+            xml,
+            slots={2},
+            protect_planar=True,
+            planar_minimum_area_mm2=100.0,
+            planar_coplanar_lane_minimum_patch_area_mm2=5.0,
+            report=report,
+        )
+        self.assertFalse(changed)
+        self.assertNotIn(b"paint_fuzzy_skin", converted)
+        self.assertEqual(report.planar_patches_protected, 3)
+        self.assertEqual(report.planar_triangles_protected, 6)
+        self.assertAlmostEqual(report.planar_area_protected_mm2, 108.0)
+
+    def test_planar_coplanar_group_rejects_broad_scattered_layout(self):
+        xml = b'''<object id="1"><mesh><vertices>
+          <vertex x="0" y="0" z="0"/><vertex x="0" y="6" z="0"/>
+          <vertex x="0" y="6" z="6"/><vertex x="0" y="0" z="6"/>
+          <vertex x="0" y="10" z="0"/><vertex x="0" y="16" z="0"/>
+          <vertex x="0" y="16" z="6"/><vertex x="0" y="10" z="6"/>
+          <vertex x="0" y="0" z="10"/><vertex x="0" y="6" z="10"/>
+          <vertex x="0" y="6" z="16"/><vertex x="0" y="0" z="16"/>
+        </vertices><triangles>
+          <triangle v1="0" v2="1" v3="2" paint_color="8"/>
+          <triangle v1="0" v2="2" v3="3" paint_color="8"/>
+          <triangle v1="4" v2="5" v3="6" paint_color="8"/>
+          <triangle v1="4" v2="6" v3="7" paint_color="8"/>
+          <triangle v1="8" v2="9" v3="10" paint_color="8"/>
+          <triangle v1="8" v2="10" v3="11" paint_color="8"/>
+        </triangles></mesh></object>'''
+        converted, changed = convert_model_xml(
+            xml,
+            slots={2},
+            protect_planar=True,
+            planar_minimum_area_mm2=100.0,
+            planar_coplanar_lane_minimum_patch_area_mm2=5.0,
+        )
+        self.assertTrue(changed)
+        self.assertEqual(converted.count(b"paint_fuzzy_skin"), 6)
+
+    def test_planar_directional_lane_axis_separates_parallel_lanes(self):
+        vertices = []
+        triangles = []
+        for lane_y in (0, 10):
+            for z_start in (0, 17, 34):
+                base = len(vertices)
+                vertices.extend(
+                    [
+                        (0, lane_y, z_start),
+                        (0, lane_y + 3, z_start),
+                        (0, lane_y + 3, z_start + 12),
+                        (0, lane_y, z_start + 12),
+                    ]
+                )
+                triangles.extend(((base, base + 1, base + 2), (base, base + 2, base + 3)))
+        vertex_xml = b"".join(
+            f'<vertex x="{x}" y="{y}" z="{z}"/>'.encode()
+            for x, y, z in vertices
+        )
+        triangle_xml = b"".join(
+            f'<triangle v1="{a}" v2="{b}" v3="{c}" paint_color="8"/>'.encode()
+            for a, b, c in triangles
+        )
+        xml = (
+            b'<object id="1"><mesh><vertices>'
+            + vertex_xml
+            + b'</vertices><triangles>'
+            + triangle_xml
+            + b'</triangles></mesh></object>'
+        )
+
+        generic, generic_changed = convert_model_xml(
+            xml,
+            slots={2},
+            protect_planar=True,
+            planar_minimum_area_mm2=100.0,
+            planar_coplanar_lane_minimum_patch_area_mm2=5.0,
+        )
+        self.assertTrue(generic_changed)
+        self.assertEqual(generic.count(b"paint_fuzzy_skin"), 12)
+
+        directional, directional_changed = convert_model_xml(
+            xml,
+            slots={2},
+            protect_planar=True,
+            planar_minimum_area_mm2=100.0,
+            planar_coplanar_lane_minimum_patch_area_mm2=5.0,
+            planar_coplanar_lane_axis=[(1.0, 0.0, 0.0), (0.0, 0.0, 1.0)],
+        )
+        self.assertFalse(directional_changed)
+        self.assertNotIn(b"paint_fuzzy_skin", directional)
+
+    def test_planar_lane_accepts_one_direct_coplanar_satellite(self):
+        xml = b'''<object id="1"><mesh><vertices>
+          <vertex x="0" y="0" z="0"/><vertex x="0" y="3" z="0"/>
+          <vertex x="0" y="3" z="40"/><vertex x="0" y="0" z="40"/>
+          <vertex x="0" y="0" z="40.5"/><vertex x="0" y="3" z="40.5"/>
+          <vertex x="0" y="3" z="46.5"/><vertex x="0" y="0" z="46.5"/>
+        </vertices><triangles>
+          <triangle v1="0" v2="1" v3="2" paint_color="8"/>
+          <triangle v1="0" v2="2" v3="3" paint_color="8"/>
+          <triangle v1="4" v2="5" v3="6" paint_color="8"/>
+          <triangle v1="4" v2="6" v3="7" paint_color="8"/>
+        </triangles></mesh></object>'''
+        report = ConversionReport()
+        converted, changed = convert_model_xml(
+            xml,
+            slots={2},
+            protect_planar=True,
+            planar_minimum_area_mm2=100.0,
+            planar_coplanar_lane_minimum_patch_area_mm2=5.0,
+            report=report,
+        )
+        self.assertFalse(changed)
+        self.assertNotIn(b"paint_fuzzy_skin", converted)
+        self.assertEqual(report.planar_patches_protected, 2)
+        self.assertAlmostEqual(report.planar_area_protected_mm2, 138.0)
+
+    def test_planar_strip_accepts_sub_five_mm2_disconnected_fragment(self):
+        xml = b'''<object id="1"><mesh><vertices>
+          <vertex x="0" y="0" z="0"/><vertex x="0" y="3" z="0"/>
+          <vertex x="0" y="3" z="12"/><vertex x="0" y="0" z="12"/>
+          <vertex x="0" y="0" z="12.5"/><vertex x="0" y="0.75" z="12.5"/>
+          <vertex x="0" y="0" z="13.5"/>
+        </vertices><triangles>
+          <triangle v1="0" v2="1" v3="2" paint_color="8"/>
+          <triangle v1="0" v2="2" v3="3" paint_color="8"/>
+          <triangle v1="4" v2="5" v3="6" paint_color="8"/>
+        </triangles></mesh></object>'''
+        report = ConversionReport()
+        converted, changed = convert_model_xml(
+            xml,
+            slots={2},
+            protect_planar=True,
+            planar_minimum_area_mm2=100.0,
+            planar_compact_strip_minimum_area_mm2=30.0,
+            planar_coplanar_lane_minimum_patch_area_mm2=5.0,
+            protect_overlap=False,
+            protect_nonmanifold=False,
+            report=report,
+        )
+        self.assertFalse(changed)
+        self.assertNotIn(b"paint_fuzzy_skin", converted)
+        self.assertEqual(report.planar_patches_protected, 2)
+
+    def test_planar_compact_strip_accepts_one_sparse_coplanar_satellite(self):
+        xml = b'''<object id="1"><mesh><vertices>
+          <vertex x="0" y="0" z="0"/><vertex x="0" y="3" z="0"/>
+          <vertex x="0" y="3" z="12"/><vertex x="0" y="0" z="12"/>
+          <vertex x="0" y="0" z="12.5"/><vertex x="0" y="3" z="12.5"/>
+          <vertex x="0" y="0" z="16.5"/>
+        </vertices><triangles>
+          <triangle v1="0" v2="1" v3="2" paint_color="8"/>
+          <triangle v1="0" v2="2" v3="3" paint_color="8"/>
+          <triangle v1="4" v2="5" v3="6" paint_color="8"/>
+        </triangles></mesh></object>'''
+        report = ConversionReport()
+        converted, changed = convert_model_xml(
+            xml,
+            slots={2},
+            protect_planar=True,
+            planar_minimum_area_mm2=100.0,
+            planar_compact_strip_minimum_area_mm2=30.0,
+            planar_coplanar_lane_minimum_patch_area_mm2=5.0,
+            report=report,
+        )
+        self.assertFalse(changed)
+        self.assertNotIn(b"paint_fuzzy_skin", converted)
+        self.assertEqual(report.planar_patches_protected, 2)
+        self.assertAlmostEqual(report.planar_area_protected_mm2, 42.0)
+
+    def test_planar_layered_feature_protects_shallow_parallel_faces(self):
+        xml = b'''<object id="1"><mesh><vertices>
+          <vertex x="0" y="0" z="0"/><vertex x="0" y="3" z="0"/>
+          <vertex x="0" y="0" z="4"/>
+          <vertex x="0.5" y="0" z="0"/><vertex x="0.5" y="3" z="0"/>
+          <vertex x="0.5" y="0" z="4"/><vertex x="0.25" y="0" z="0"/>
+        </vertices><triangles>
+          <triangle v1="0" v2="1" v3="2" paint_color="8"/>
+          <triangle v1="3" v2="4" v3="5" paint_color="8"/>
+          <triangle v1="3" v2="4" v3="6" paint_color="8"/>
+        </triangles></mesh></object>'''
+        report = ConversionReport()
+        converted, changed = convert_model_xml(
+            xml,
+            slots={2},
+            protect_planar=True,
+            planar_minimum_area_mm2=100.0,
+            planar_coplanar_lane_minimum_patch_area_mm2=5.0,
+            planar_layered_feature_maximum_depth_mm=1.0,
+            report=report,
+        )
+        self.assertFalse(changed)
+        self.assertNotIn(b"paint_fuzzy_skin", converted)
+        self.assertEqual(report.planar_patches_protected, 3)
+        self.assertAlmostEqual(report.planar_area_protected_mm2, 12.375)
 
     def test_planar_protection_merges_across_duplicated_seam_vertices(self):
         # Two coplanar triangles forming one 10x10 flat square (100mm2), but
@@ -152,6 +636,32 @@ class XmlConversionTests(unittest.TestCase):
         self.assertEqual(report.planar_patches_protected, 1)
         self.assertEqual(report.planar_triangles_protected, 2)
         self.assertAlmostEqual(report.planar_area_protected_mm2, 100.0)
+
+    def test_planar_protection_classifies_geometry_across_paint_boundary(self):
+        # The two triangles form one 100mm2 geometric face, but only one is
+        # painted. The painted half is below the 60mm2 threshold by itself;
+        # it is protected only if patch discovery uses the complete geometry
+        # and applies the paint selection after classifying the flat patch.
+        xml = b'''<object id="1"><mesh><vertices>
+          <vertex x="0" y="0" z="0"/><vertex x="10" y="0" z="0"/>
+          <vertex x="10" y="10" z="0"/><vertex x="0" y="10" z="0"/>
+        </vertices><triangles>
+          <triangle v1="0" v2="1" v3="2"/>
+          <triangle v1="0" v2="2" v3="3" paint_color="8"/>
+        </triangles></mesh></object>'''
+        report = ConversionReport()
+        converted, changed = convert_model_xml(
+            xml,
+            slots={2},
+            protect_planar=True,
+            planar_minimum_area_mm2=60.0,
+            report=report,
+        )
+        self.assertFalse(changed)
+        self.assertNotIn(b"paint_fuzzy_skin", converted)
+        self.assertEqual(report.planar_patches_protected, 1)
+        self.assertEqual(report.planar_triangles_protected, 1)
+        self.assertAlmostEqual(report.planar_area_protected_mm2, 50.0)
 
     def test_planar_protection_absorbs_local_noise_via_patch_average(self):
         # Three triangles, H-A-B, sharing edges in a chain (H-A, then A-B --
@@ -192,18 +702,16 @@ class XmlConversionTests(unittest.TestCase):
         self.assertEqual(report.planar_triangles_protected, 3)
         self.assertAlmostEqual(report.planar_area_protected_mm2, 28.020501801195622, places=6)
 
-    def test_planar_protection_absorbs_small_island_next_to_large_patch(self):
+    def test_planar_protection_does_not_absorb_angled_small_island(self):
         # H is a flat 10x10mm square (two triangles, 100mm2 total) -- well
         # over the 15mm2 threshold on its own. S is a small (~5.6mm2)
         # triangle sharing an edge with H but tilted ~63 degrees off H's
         # normal (dot = -0.447), nowhere close to the 7 degree tolerance, so
         # it correctly fails to merge into H's patch during angle-based
-        # growth and would, on its own, be a separate sub-threshold patch
-        # that gets fuzzed. This is the "ghost outline of an incompletely
-        # cut stone block" scenario: a real small step sitting right next to
-        # an otherwise-flat area. Since S is geometrically edge-adjacent to
-        # the already-large H patch, the absorption pass should pull it
-        # into protection anyway, regardless of its own normal.
+        # growth. S must remain eligible for fuzz: recursively absorbing
+        # angle-separated neighbours lets one large seed swallow an entire
+        # connected model and is the source of the excessive protection this
+        # regression test guards against.
         xml = b'''<object id="1"><mesh><vertices>
           <vertex x="0" y="0" z="0"/><vertex x="10" y="0" z="0"/>
           <vertex x="10" y="10" z="0"/><vertex x="0" y="10" z="0"/>
@@ -222,11 +730,11 @@ class XmlConversionTests(unittest.TestCase):
             planar_minimum_area_mm2=15.0,
             report=report,
         )
-        self.assertFalse(changed)
-        self.assertNotIn(b"paint_fuzzy_skin", converted)
+        self.assertTrue(changed)
+        self.assertEqual(converted.count(b"paint_fuzzy_skin"), 1)
         self.assertEqual(report.planar_patches_protected, 1)
-        self.assertEqual(report.planar_triangles_protected, 3)
-        self.assertAlmostEqual(report.planar_area_protected_mm2, 105.59016994374948, places=6)
+        self.assertEqual(report.planar_triangles_protected, 2)
+        self.assertAlmostEqual(report.planar_area_protected_mm2, 100.0, places=6)
 
     def test_planar_protection_leaves_isolated_small_patch_unprotected(self):
         # A small (2mm2) triangle with no large patch anywhere nearby to be
@@ -325,6 +833,130 @@ class XmlConversionTests(unittest.TestCase):
         self.assertTrue(changed)
         self.assertIn(b"paint_fuzzy_skin", converted)
         self.assertEqual(report.overlap_triangles_protected, 0)
+
+    def test_overlap_protection_depth_mm_is_opt_in_and_stays_within_one_shell_pair(self):
+        # depth_mm defaults to max_gap_mm (a no-op) because raising it was
+        # tried on a real model and rejected -- see _find_overlap_protection's
+        # docstring: kitbashed rocks sit close to their own neighbours across
+        # most of their surface, so a wider Euclidean radius does not find
+        # just an embedded tip, it swallows whole decorative chunks. The
+        # parameter is kept, unused by default, in case a future geodesic
+        # (surface-distance) version wants it. This test exercises the
+        # low-level function directly with an explicit depth_mm, since the
+        # public pipeline no longer passes anything but the default.
+        #
+        # Triangle 0 (A) is the wall. Triangle 1 (B1) touches A at a single
+        # point near A's corner. Triangle 2 (B2) shares a vertex position
+        # with B1 (same shell) but is ~1.4mm from A -- farther than
+        # max_gap_mm (0.3) but within an explicit depth_mm=3.0. Triangle 3
+        # (C) sits close to B2 in space but was never itself confirmed
+        # touching anything -- it must stay unprotected even at depth_mm=3.0,
+        # because depth only extends along a shell already proven colliding
+        # with a *specific* other shell, not a blanket "anything nearby".
+        xml = b'''<object id="1"><mesh><vertices>
+          <vertex x="0" y="0" z="0"/><vertex x="2" y="0" z="0"/>
+          <vertex x="0" y="2" z="0"/>
+          <vertex x="0.05" y="0.05" z="0.05"/><vertex x="0.3" y="0.05" z="0.05"/><vertex x="0.05" y="0.3" z="0.05"/>
+          <vertex x="0.3" y="0.05" z="0.05"/><vertex x="0.3" y="0.05" z="2.0"/><vertex x="0.5" y="0.05" z="2.0"/>
+          <vertex x="0.3" y="0.05" z="3.5"/><vertex x="0.5" y="0.05" z="3.5"/><vertex x="0.4" y="0.3" z="3.5"/>
+        </vertices><triangles>
+          <triangle v1="0" v2="1" v3="2"/>
+          <triangle v1="3" v2="4" v3="5"/>
+          <triangle v1="6" v2="7" v3="8"/>
+          <triangle v1="9" v2="10" v3="11"/>
+        </triangles></mesh></object>'''
+        protected, _ = _find_overlap_protection(xml, depth_mm=3.0)
+        self.assertEqual(protected, {0, 1, 2})
+
+    def test_coincident_protection_skips_a_whole_flat_patch_on_both_sides(self):
+        # Shell A (a flat 2x2 square, triangles 0+1 sharing an edge) and
+        # shell B (a second flat 2x2 square, triangles 2+3 sharing an edge)
+        # sit almost exactly on top of each other -- B is offset only
+        # 0.02mm in z, a different shell (no shared vertex positions with
+        # A), the real shape of a mortise joint's own flat wall sitting
+        # coincident with whatever meets it. Both patches must be fully
+        # protected, not just the two seed triangles that triggered
+        # detection -- confirmed by the whole 2x2 square on each side
+        # being skipped, not merely the first triangle of each.
+        # Flatness+coincidence alone is no longer enough -- three extra,
+        # unpainted triangles (8,9,10 / 8,9,11 / 8,9,12) share one edge
+        # (8-9) among themselves, making it non-manifold. They sit right
+        # next to the coincident squares (just outside their footprint,
+        # at the same z height) but share no vertex with either -- the
+        # corroborating "there is scarred/debris geometry right here"
+        # evidence the check now requires, found purely by proximity, not
+        # by being part of either shell.
+        xml = b'''<object id="1"><mesh><vertices>
+          <vertex x="0" y="0" z="0"/><vertex x="2" y="0" z="0"/><vertex x="0" y="2" z="0"/><vertex x="2" y="2" z="0"/>
+          <vertex x="0" y="0" z="0.02"/><vertex x="2" y="0" z="0.02"/><vertex x="0" y="2" z="0.02"/><vertex x="2" y="2" z="0.02"/>
+          <vertex x="0.5" y="-0.5" z="0.02"/><vertex x="1" y="-1" z="0.02"/>
+          <vertex x="1.5" y="-0.5" z="0.02"/><vertex x="2" y="-1" z="0.02"/><vertex x="2.5" y="-0.5" z="0.02"/>
+        </vertices><triangles>
+          <triangle v1="0" v2="1" v3="2" paint_color="8"/>
+          <triangle v1="1" v2="3" v3="2" paint_color="8"/>
+          <triangle v1="4" v2="5" v3="6" paint_color="8"/>
+          <triangle v1="5" v2="7" v3="6" paint_color="8"/>
+          <triangle v1="8" v2="9" v3="10"/>
+          <triangle v1="8" v2="9" v3="11"/>
+          <triangle v1="8" v2="9" v3="12"/>
+        </triangles></mesh></object>'''
+        report = ConversionReport()
+        converted, changed = convert_model_xml(
+            xml, slots={2}, protect_coincident=True, report=report
+        )
+        self.assertFalse(changed)
+        self.assertNotIn(b"paint_fuzzy_skin", converted)
+        self.assertEqual(report.coincident_triangles_protected, 4)
+
+    def test_coincident_protection_ignores_a_nearby_differently_angled_shell(self):
+        # Same coincident pair as above, plus a third shell (C, triangle 4)
+        # that sits spatially close to A/B but lies in a completely
+        # different plane (perpendicular, not coplanar) -- an ordinary
+        # adjacent wall meeting this one at a corner, not a second surface
+        # sitting on top of it. C must stay fuzzed. Same evidence
+        # triangles as the first test (see its comment) so A/B still pass
+        # the non-manifold-evidence requirement.
+        xml = b'''<object id="1"><mesh><vertices>
+          <vertex x="0" y="0" z="0"/><vertex x="2" y="0" z="0"/><vertex x="0" y="2" z="0"/><vertex x="2" y="2" z="0"/>
+          <vertex x="0" y="0" z="0.02"/><vertex x="2" y="0" z="0.02"/><vertex x="0" y="2" z="0.02"/><vertex x="2" y="2" z="0.02"/>
+          <vertex x="0" y="0" z="0.1"/><vertex x="2" y="0" z="0.1"/><vertex x="0" y="0" z="2.1"/>
+          <vertex x="0.5" y="-0.5" z="0.02"/><vertex x="1" y="-1" z="0.02"/>
+          <vertex x="1.5" y="-0.5" z="0.02"/><vertex x="2" y="-1" z="0.02"/><vertex x="2.5" y="-0.5" z="0.02"/>
+        </vertices><triangles>
+          <triangle v1="0" v2="1" v3="2" paint_color="8"/>
+          <triangle v1="1" v2="3" v3="2" paint_color="8"/>
+          <triangle v1="4" v2="5" v3="6" paint_color="8"/>
+          <triangle v1="5" v2="7" v3="6" paint_color="8"/>
+          <triangle v1="8" v2="9" v3="10" paint_color="8"/>
+          <triangle v1="11" v2="12" v3="13"/>
+          <triangle v1="11" v2="12" v3="14"/>
+          <triangle v1="11" v2="12" v3="15"/>
+        </triangles></mesh></object>'''
+        report = ConversionReport()
+        converted, changed = convert_model_xml(
+            xml, slots={2}, protect_coincident=True, report=report
+        )
+        self.assertTrue(changed)
+        self.assertIn(b"paint_fuzzy_skin", converted)
+        self.assertEqual(report.coincident_triangles_protected, 4)
+
+    def test_coincident_protection_can_be_disabled(self):
+        xml = b'''<object id="1"><mesh><vertices>
+          <vertex x="0" y="0" z="0"/><vertex x="2" y="0" z="0"/><vertex x="0" y="2" z="0"/><vertex x="2" y="2" z="0"/>
+          <vertex x="0" y="0" z="0.02"/><vertex x="2" y="0" z="0.02"/><vertex x="0" y="2" z="0.02"/><vertex x="2" y="2" z="0.02"/>
+        </vertices><triangles>
+          <triangle v1="0" v2="1" v3="2" paint_color="8"/>
+          <triangle v1="1" v2="3" v3="2" paint_color="8"/>
+          <triangle v1="4" v2="5" v3="6" paint_color="8"/>
+          <triangle v1="5" v2="7" v3="6" paint_color="8"/>
+        </triangles></mesh></object>'''
+        report = ConversionReport()
+        converted, changed = convert_model_xml(
+            xml, slots={2}, protect_coincident=False, report=report
+        )
+        self.assertTrue(changed)
+        self.assertIn(b"paint_fuzzy_skin", converted)
+        self.assertEqual(report.coincident_triangles_protected, 0)
 
     def test_nonmanifold_protection_skips_a_painted_triangle_on_a_shared_edge(self):
         # Three triangles (A painted, B and C unpainted) all share the same

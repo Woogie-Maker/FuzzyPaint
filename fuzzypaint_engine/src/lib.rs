@@ -3,6 +3,7 @@ mod emit;
 mod gcode;
 mod grid;
 mod metadata;
+mod mesh_protection;
 mod orchestrate;
 mod planner;
 mod segments;
@@ -575,6 +576,90 @@ mod fuzzypaint_engine {
     #[pyfunction]
     fn sum_as_string(a: usize, b: usize) -> PyResult<String> {
         Ok((a + b).to_string())
+    }
+
+    /// Rust implementation of the two spatial protection passes used during
+    /// project preparation. Returns `(flat_contacts, fuzz_envelope)` where
+    /// each list contains `(source_triangle_index, area_mm2)` pairs.
+    #[pyfunction]
+    #[pyo3(signature = (object_xml, slots=None, distance_mm=0.25, contact_neighbor_rings=3))]
+    fn find_flat_contact_and_fuzz_envelope(
+        object_xml: &[u8],
+        slots: Option<Vec<i64>>,
+        distance_mm: f64,
+        contact_neighbor_rings: usize,
+    ) -> PyResult<(Vec<(usize, f64)>, Vec<(usize, f64)>)> {
+        crate::mesh_protection::find_flat_contact_and_fuzz_envelope(
+            object_xml,
+            slots.as_deref(),
+            distance_mm,
+            contact_neighbor_rings,
+        )
+        .map_err(super::PyValueError::new_err)
+    }
+
+    /// Combined preparation pass. The Python fallback still handles the
+    /// optional lane/layered classifiers; this covers the app's normal path
+    /// and parses each large mesh only once.
+    #[pyfunction]
+    #[pyo3(signature = (
+        object_xml, slots=None, *, angle_degrees=2.0, minimum_area_mm2=90.0,
+        compact_strip_minimum_area_mm2=None, compact_strip_minimum_aspect_ratio=3.0,
+        compact_strip_minimum_fill_ratio=0.65, compact_strip_maximum_length_mm=30.0,
+        compact_strip_maximum_normal_z=0.1, protect_connected_coplanar=true,
+        connected_coplanar_angle_degrees=2.0, connected_coplanar_plane_tolerance_mm=0.25,
+        connected_coplanar_minimum_short_span_mm=2.5, connected_coplanar_minimum_long_span_mm=6.0,
+        connected_coplanar_satellite_gap_mm=0.5, distance_mm=0.25, contact_neighbor_rings=3
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn find_mesh_protection(
+        object_xml: &[u8],
+        slots: Option<Vec<i64>>,
+        angle_degrees: f64,
+        minimum_area_mm2: f64,
+        compact_strip_minimum_area_mm2: Option<f64>,
+        compact_strip_minimum_aspect_ratio: f64,
+        compact_strip_minimum_fill_ratio: f64,
+        compact_strip_maximum_length_mm: f64,
+        compact_strip_maximum_normal_z: f64,
+        protect_connected_coplanar: bool,
+        connected_coplanar_angle_degrees: f64,
+        connected_coplanar_plane_tolerance_mm: f64,
+        connected_coplanar_minimum_short_span_mm: f64,
+        connected_coplanar_minimum_long_span_mm: f64,
+        connected_coplanar_satellite_gap_mm: f64,
+        distance_mm: f64,
+        contact_neighbor_rings: usize,
+    ) -> PyResult<(Vec<usize>, usize, f64, Vec<(usize, f64)>, Vec<(usize, f64)>)> {
+        let result = crate::mesh_protection::find_mesh_protection(
+            object_xml,
+            slots.as_deref(),
+            crate::mesh_protection::PlanarOptions {
+                angle_degrees,
+                minimum_area_mm2,
+                compact_strip_minimum_area_mm2,
+                compact_strip_minimum_aspect_ratio,
+                compact_strip_minimum_fill_ratio,
+                compact_strip_maximum_length_mm,
+                compact_strip_maximum_normal_z,
+                protect_connected_coplanar,
+                connected_coplanar_angle_degrees,
+                connected_coplanar_plane_tolerance_mm,
+                connected_coplanar_minimum_short_span_mm,
+                connected_coplanar_minimum_long_span_mm,
+                connected_coplanar_satellite_gap_mm,
+            },
+            distance_mm,
+            contact_neighbor_rings,
+        )
+        .map_err(super::PyValueError::new_err)?;
+        Ok((
+            result.planar,
+            result.planar_patch_count,
+            result.planar_area,
+            result.contacts,
+            result.envelope,
+        ))
     }
 
     /// Port of `gcode_single_filament._find_tower_excursion_ranges`.

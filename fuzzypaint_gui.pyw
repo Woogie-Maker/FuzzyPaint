@@ -38,9 +38,17 @@ try:
     import fuzzypaint_engine
 except ImportError:
     fuzzypaint_engine = None
+else:
+    # A source checkout also contains the Rust crate directory, which Python
+    # can see as an empty namespace package even when no compatible compiled
+    # extension is installed. Only advertise the engine when the operation
+    # used by this GUI is genuinely available.
+    if not hasattr(fuzzypaint_engine, "process_gcode_3mf"):
+        fuzzypaint_engine = None
 
 
-APP_VERSION = "0.8.2"
+APP_VERSION = "0.11.2"
+SETTINGS_SCHEMA_VERSION = 2
 
 OUTPUT_SUBFOLDER_NAME = "FuzzyPaint Output"
 GITHUB_URL = "https://github.com/Woogie-Maker/FuzzyPaint"
@@ -311,6 +319,11 @@ class ToolTip:
 class App(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
+        # Build the complete interface off-screen. SelectableLabel performs
+        # geometry-dependent sizing during construction; exposing the root
+        # window first lets Windows paint each intermediate layout and makes
+        # startup look substantially slower than it is.
+        self.withdraw()
         self.title("FuzzyPaint")
         self.minsize(800, 680)
         # Pin an explicit, centred position on the primary monitor instead of
@@ -379,6 +392,11 @@ class App(tk.Tk):
             foreground="#555555",
             width=90,
         ).pack(side="left")
+
+        # Resolve all pending geometry while hidden, then present one complete
+        # frame instead of visibly assembling the UI widget by widget.
+        self.update_idletasks()
+        self.deiconify()
 
     @staticmethod
     def _avoid_overwrite(destination: Path, destination_variable: tk.StringVar) -> Path:
@@ -532,8 +550,9 @@ class App(tk.Tk):
         self.project_destination = tk.StringVar()
         self.project_slots = tk.StringVar(value="2")
         self.protect_planar = tk.BooleanVar(value=True)
-        self.protect_overlap = tk.BooleanVar(value=True)
-        self.protect_nonmanifold = tk.BooleanVar(value=True)
+        self.protect_overlap = tk.BooleanVar(value=False)
+        self.protect_nonmanifold = tk.BooleanVar(value=False)
+        self.protect_coincident = tk.BooleanVar(value=False)
         self.disable_wipe = tk.BooleanVar(value=True)
         self.disable_retractions = tk.BooleanVar(value=True)
         self.force_sloped_z_hop = tk.BooleanVar(value=True)
@@ -541,7 +560,7 @@ class App(tk.Tk):
         self.prepare_status = tk.StringVar(value="Start by choosing your colour-painted Bambu Studio project.")
         self.prepare_advanced = tk.BooleanVar(value=False)
         self.planar_angle = tk.StringVar(value="2.0")
-        self.planar_area = tk.StringVar(value="20.0")
+        self.planar_area = tk.StringVar(value="90.0")
         self.override_fuzzy = tk.BooleanVar(value=True)
         self.fuzzy_thickness = tk.StringVar(value="0.25")
         self.fuzzy_distance = tk.StringVar(value="0.05")
@@ -613,6 +632,22 @@ class App(tk.Tk):
             "welded onto the real surface) and never fuzzes them, regardless of paint. Adds "
             "some preparation time on very large/detailed models. Turn off for quick "
             "iteration; turn on for your final output.",
+        )
+        coincident_check = self._labeled_check(
+            form,
+            "Skip fuzzing flat surfaces that sit coincident with another part (experimental, off by default)",
+            self.protect_coincident,
+        )
+        coincident_check.grid(row=10, column=0, columnspan=3, sticky="w", pady=(4, 2))
+        ToolTip(
+            coincident_check,
+            "Detects two disconnected parts' flat faces sitting almost exactly on top of each "
+            "other (the real cause of z-fighting/flicker in a 3D viewer) and never fuzzes "
+            "either one, for the whole flat surface each belongs to -- regardless of paint. "
+            "Validated well on a hand-picked mortise-joint test case, but on a complex model "
+            "with many legitimately-touching mechanical parts (levers, ledges, hinges) it can "
+            "also remove fuzz from surfaces that were never a defect. Off by default -- turn "
+            "on and check the sliced result carefully before trusting it for a final export.",
         )
 
         self._disclosure_toggle(
@@ -841,6 +876,7 @@ class App(tk.Tk):
             "protect_planar": self.protect_planar,
             "protect_overlap": self.protect_overlap,
             "protect_nonmanifold": self.protect_nonmanifold,
+            "protect_coincident": self.protect_coincident,
             "disable_wipe": self.disable_wipe,
             "disable_retractions": self.disable_retractions,
             "force_sloped_z_hop": self.force_sloped_z_hop,
@@ -872,7 +908,9 @@ class App(tk.Tk):
         }
 
     def _collect_settings(self) -> dict[str, object]:
-        return {name: var.get() for name, var in self._settings_fields().items()}
+        settings = {name: var.get() for name, var in self._settings_fields().items()}
+        settings["_settings_schema"] = SETTINGS_SCHEMA_VERSION
+        return settings
 
     def _apply_settings(self, data: dict[str, object]) -> None:
         fields = self._settings_fields()
@@ -891,6 +929,13 @@ class App(tk.Tk):
     def _load_settings_file(self) -> None:
         data = _load_json_dict(SETTINGS_FILE)
         if data:
+            # 0.11 replaces the early debris-detector defaults with the
+            # validated, geometry-based smooth-surface profile. Preserve the
+            # user's other preferences while allowing these safer defaults to
+            # take effect for settings files written by older releases.
+            if data.get("_settings_schema") != SETTINGS_SCHEMA_VERSION:
+                for key in ("protect_overlap", "protect_nonmanifold", "planar_area"):
+                    data.pop(key, None)
             self._apply_settings(data)
 
     def save_settings(self) -> None:
@@ -1124,6 +1169,7 @@ class App(tk.Tk):
         protect_planar = self.protect_planar.get()
         protect_overlap = self.protect_overlap.get()
         protect_nonmanifold = self.protect_nonmanifold.get()
+        protect_coincident = self.protect_coincident.get()
         disable_wipe = self.disable_wipe.get()
         disable_retractions = self.disable_retractions.get()
         force_sloped_z_hop = self.force_sloped_z_hop.get()
@@ -1134,8 +1180,24 @@ class App(tk.Tk):
             report = convert_3mf(
                 source, destination, slots=selected_slots, remove_colour=False,
                 protect_planar=protect_planar, planar_angle_degrees=angle,
-                planar_minimum_area_mm2=area, protect_overlap=protect_overlap,
+                planar_minimum_area_mm2=area,
+                planar_compact_strip_minimum_area_mm2=30.0 if protect_planar else None,
+                protect_connected_coplanar=protect_planar,
+                connected_coplanar_angle_degrees=angle,
+                connected_coplanar_plane_tolerance_mm=0.25,
+                connected_coplanar_minimum_short_span_mm=2.5,
+                connected_coplanar_minimum_long_span_mm=6.0,
+                connected_coplanar_satellite_gap_mm=0.5,
+                protect_flat_contact=protect_planar,
+                protect_fuzz_envelope=protect_planar,
+                fuzz_envelope_distance_mm=(
+                    float(fuzzy_settings["fuzzy_skin_thickness"])
+                    if fuzzy_settings is not None else 0.25
+                ),
+                fuzz_envelope_contact_neighbor_rings=3,
+                protect_overlap=protect_overlap,
                 protect_nonmanifold=protect_nonmanifold,
+                protect_coincident=protect_coincident,
                 single_colour=False, fuzzy_settings=fuzzy_settings,
                 disable_wipe_while_retracting=disable_wipe,
                 disable_retractions=disable_retractions,
@@ -1218,11 +1280,15 @@ class App(tk.Tk):
 
         def work():
             started = time.perf_counter()
+            phase_timings: dict[str, float] = {}
             automatically_sliced = not archive_has_gcode(source)
+            phase_started = time.perf_counter()
             expected_fuzzy = self._project_fuzzy_settings(source) if automatically_sliced else None
+            phase_timings["Inspect project"] = time.perf_counter() - phase_started
             with tempfile.TemporaryDirectory(prefix="c2f-slice-", dir=destination.parent) as temporary:
                 sliced_source = source
                 if automatically_sliced:
+                    phase_started = time.perf_counter()
                     configured_source = Path(temporary) / "automatic-slice-input.3mf"
                     configure_project_for_slicing(
                         source,
@@ -1231,12 +1297,16 @@ class App(tk.Tk):
                         disable_wipe_while_retracting=disable_wipe_while_retracting,
                         force_sloped_z_hop=force_sloped_z_hop,
                     )
+                    phase_timings["Configure slice input"] = time.perf_counter() - phase_started
+                    phase_started = time.perf_counter()
                     sliced_source = Path(temporary) / "automatic-slice.3mf"
                     slice_project(configured_source, sliced_source)
+                    phase_timings["Bambu Studio slicing"] = time.perf_counter() - phase_started
                 if fuzzypaint_engine is not None:
                     # Rust engine (see fuzzypaint_engine/): parses, plans,
                     # emits and collapses in one call. Falls back to the
                     # pure-Python path below if the extension isn't built.
+                    phase_started = time.perf_counter()
                     engine_result = fuzzypaint_engine.process_gcode_3mf(
                         str(sliced_source), str(destination),
                         inset_mm=depth, boundary_resolution_mm=resolution,
@@ -1247,7 +1317,9 @@ class App(tk.Tk):
                     )
                     detour_count = engine_result.pop("detour_count")
                     report = CollapseReport(**engine_result)
+                    phase_timings["Rust G-code processing"] = time.perf_counter() - phase_started
                 else:
+                    phase_started = time.perf_counter()
                     replacements = build_interval_detours(
                         sliced_source, inset_mm=depth, boundary_resolution_mm=resolution,
                         transition_distance_mm=transition, endpoint_coverage_mm=coverage,
@@ -1256,13 +1328,18 @@ class App(tk.Tk):
                         filament_overrides=overrides,
                     )
                     detour_count = len(replacements)
+                    phase_timings["Python detour planning"] = time.perf_counter() - phase_started
+                    phase_started = time.perf_counter()
                     report = collapse_gcode_3mf(
                         sliced_source,
                         destination,
                         line_replacements=replacements,
                         strip_nonprint_auxiliaries=strip_attachments,
                     )
+                    phase_timings["Python package rewriting"] = time.perf_counter() - phase_started
+            phase_started = time.perf_counter()
             validation = self._validate_sliced_package(destination)
+            phase_timings["Validate output"] = time.perf_counter() - phase_started
             if expected_fuzzy is not None:
                 actual_fuzzy = (validation["fuzzy_thickness"], validation["fuzzy_distance"])
                 if any(abs(float(actual) - float(expected)) > 1e-9 for actual, expected in zip(actual_fuzzy, expected_fuzzy)):
@@ -1271,17 +1348,24 @@ class App(tk.Tk):
                         f"expected {expected_fuzzy[0]} / {expected_fuzzy[1]}, "
                         f"but G-code contains {actual_fuzzy[0]} / {actual_fuzzy[1]}"
                     )
-            return detour_count, report, validation, time.perf_counter() - started, automatically_sliced
+            elapsed_seconds = time.perf_counter() - started
+            return detour_count, report, validation, elapsed_seconds, automatically_sliced, phase_timings
 
         def done(result):
-            detour_count, report, validation, elapsed_seconds, automatically_sliced = result
-            if elapsed_seconds >= 60:
-                minutes, seconds = divmod(elapsed_seconds, 60)
-                elapsed_text = f"{int(minutes)} min {seconds:.1f} sec"
-            else:
-                elapsed_text = f"{elapsed_seconds:.1f} sec"
+            detour_count, report, validation, elapsed_seconds, automatically_sliced, phase_timings = result
+
+            def elapsed_text(seconds: float) -> str:
+                if seconds >= 60:
+                    minutes, remainder = divmod(seconds, 60)
+                    return f"{int(minutes)} min {remainder:.1f} sec"
+                return f"{seconds:.1f} sec"
+
+            timing_summary = "\n".join(
+                f"  {name}: {elapsed_text(seconds)}" for name, seconds in phase_timings.items()
+            )
             summary = (
-                f"Created {destination.name}\n\nProcessing time: {elapsed_text}\n"
+                f"Created {destination.name}\n\nTotal processing time: {elapsed_text(elapsed_seconds)}\n"
+                f"Phase timings:\n{timing_summary}\n"
                 f"Automatic Bambu Studio slice: {'yes' if automatically_sliced else 'not needed'}\n"
                 f"Retractions disabled before slicing: "
                 f"{'yes' if automatically_sliced and disable_retractions else 'no'}\n"
@@ -1427,5 +1511,11 @@ def _declare_dpi_aware() -> None:
 
 
 if __name__ == "__main__":
+    if "--self-test" in sys.argv:
+        # Used by release packaging to verify that all bundled modules import
+        # successfully without creating a window.
+        if "--require-rust" in sys.argv and fuzzypaint_engine is None:
+            raise SystemExit(2)
+        raise SystemExit(0)
     _declare_dpi_aware()
     App().mainloop()
