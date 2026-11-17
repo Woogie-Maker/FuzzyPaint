@@ -25,10 +25,8 @@ tower from the final sliced file.
 
 ## Why FuzzyPaint exists
 
-FuzzyPaint began with a real printing project: the beautifully designed
-[Relic Rush board game on MakerWorld](https://makerworld.com/en/models/2046733-relic-rush-board-game#profileId-2208645).
-Its towering ruins, stonework, vines, moss, and lava made it an irresistible
-model to print.
+FuzzyPaint began with a real printing project: the beautifully designed [Relic Rush board game on MakerWorld](https://makerworld.com/en/models/2046733-relic-rush-board-game#profileId-2208645).<br>
+Its towering ruins, stonework, vines, moss, and lava made it an irresistible model to print.
 
 <div align="center">
   <a href="https://makerworld.com/en/models/2046733-relic-rush-board-game#profileId-2208645">
@@ -38,11 +36,12 @@ model to print.
   <em>Relic Rush — the board game whose richly detailed terrain inspired FuzzyPaint. Click the image to view the original model on MakerWorld.</em>
 </div>
 
+
 Printing it also exposed a gap in the normal workflow. Bambu Studio's colour
 painting showed exactly where the organic detail belonged; printing in one
 colour lost that visual guide, while printing every painted region in a second
 filament introduced hundreds of colour changes, purge waste, and a prime
-tower.
+tower, which result in hugely increased print times and filament usage.
 
 The app was initially created to solve that specific problem: turn the painted
 detail into real texture, retain its boundaries, and produce a practical
