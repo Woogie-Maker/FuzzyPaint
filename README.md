@@ -1,72 +1,131 @@
+<div align="center">
+
+<img src="docs/assets/fuzzypaint-icon.png" alt="FuzzyPaint icon" width="180">
+
 # FuzzyPaint
 
-*For Bambu Studio — turn painted colours into surface texture and
-single-filament detail.*
+**Turn Bambu Studio colour painting into tactile surface detail — then create a true single-filament print.**
 
-For a file-by-file explanation of the complete GUI workflow, see
-[WORKFLOW.md](WORKFLOW.md).
+[![Release](https://img.shields.io/badge/release-v0.12.0-0969da?style=flat-square)](https://github.com/Woogie-Maker/FuzzyPaint/releases)
+[![Platform](https://img.shields.io/badge/platform-Windows-0078d4?style=flat-square)](#quick-start)
+[![Python](https://img.shields.io/badge/Python-3.15.2-3776ab?style=flat-square)](#running-from-source)
+
+[Download the latest release](https://github.com/Woogie-Maker/FuzzyPaint/releases) · [Workflow guide](WORKFLOW.md) · [Changelog](CHANGELOG.md)
+
+</div>
 
 FuzzyPaint converts filament colour painting in a Bambu Studio or OrcaSlicer
-`.3mf` project into fuzzy-skin painting. It works directly on the per-triangle
-paint masks, so fine brush boundaries and Bambu's internally subdivided
-triangles are retained.
+`.3mf` project into fuzzy-skin painting. It works directly with the
+per-triangle paint masks, preserving fine brush boundaries and Bambu's
+internally subdivided triangles.
 
-## Use on Windows
+Its two-stage workflow can then preserve those painted-region boundaries as
+physical outline detours while removing colour changes, purging, and the prime
+tower from the final sliced file.
 
-1. Save the painted model as a **3MF project** in Bambu Studio. STL files do not
-   contain painting data.
-2. Double-click **Start FuzzyPaint.bat**. The old FuzzyPaint launcher remains
-   as a compatibility alias.
-3. On **1 Prepare project**, choose the input project and a new output filename.
-4. Enter `all`, or specific filament slot numbers such as `2` or `2,4`.
-5. Leave **Protect large flat painted surfaces** enabled when the model has
-   mortises, mating faces, or smooth mechanical recesses that must retain their
-   dimensional fit.
-6. **Disable retractions** is enabled by default for the current detailed
-   single-filament workflow. It sets the process fallback and every virtual
-   filament override to zero before Bambu Studio slices the project.
-   **Disable wipe while retracting** is also enabled by default for this
-   single-filament workflow. It matters when retractions are enabled again;
-   untick it if a particular material or model prints better with wiping.
-   **Use sloped Z-hop for every filament** is also enabled by default. It
-   changes the lift type while retaining the project’s existing Z-hop heights.
-7. Prepare the project. FuzzyPaint selects the new `.3mf` on the second tab.
-   By default, the prepared copy omits embedded manuals, creation-kit archives
-   and model pictures while retaining thumbnails, geometry and every print
-   profile setting. This substantially reduces intermediate file I/O.
-8. On **2 Create single-filament file**, use the Balanced preset and create the
-   print file. FuzzyPaint runs the installed Bambu Studio slicer automatically
-   using the complete print profile stored in the prepared project. The regular
-   Bambu Studio window may remain open. The same retraction, wipe and Z-hop
-   choices as step 1 are enforced again here, on a temporary slicing copy, so
-   older prepared projects do not need the expensive preparation stage
-   repeated.
-9. The result retains the painted-region toolpath
-   segmentation while removing colour swaps and the purge tower.
-   Leave **Remove embedded guides, pictures and downloads** enabled. MakerWorld
-   projects can contain hundreds of megabytes of non-print attachments that
-   otherwise make transfer to the printer unnecessarily slow.
-10. Open the processed file and inspect the complete Preview before printing.
+## See the difference
 
-If automatic slicing is unavailable, the manual route still works: open the
-prepared project in Bambu Studio, slice it, use **Export plate sliced file**,
-then choose that `.gcode.3mf` on tab 2.
+Click any image for the full-size view. The linked gallery pages include
+visible **previous** and **next** controls for stepping through the sequence.
 
-The original project is never overwritten. By default, the tool **keeps the
-original colour painting** and adds fuzzy skin to the same areas. This is the
-safest choice for existing multicolour print projects. Tick the removal option
-only when colour was used purely as a temporary mask. Existing fuzzy paint on
-triangles that have no colour paint is preserved.
+<table>
+  <tr>
+    <td width="20%"><a href="docs/gallery/01-original-paint.md"><img src="docs/assets/gallery/01-original-paint.png" alt="Original colour-painted model"></a></td>
+    <td width="20%"><a href="docs/gallery/02-original-paint-sliced.md"><img src="docs/assets/gallery/02-original-paint-sliced.jpg" alt="Original multicolour sliced result"></a></td>
+    <td width="20%"><a href="docs/gallery/03-original-single-colour.md"><img src="docs/assets/gallery/03-original-single-colour.png" alt="Ordinary single-colour sliced result"></a></td>
+    <td width="20%"><a href="docs/gallery/04-fuzzypaint-sliced.md"><img src="docs/assets/gallery/04-fuzzypaint-sliced.jpg" alt="FuzzyPaint multicolour sliced result"></a></td>
+    <td width="20%"><a href="docs/gallery/05-fuzzypaint-single-colour.md"><img src="docs/assets/gallery/05-fuzzypaint-single-colour.jpg" alt="Final FuzzyPaint single-colour sliced result"></a></td>
+  </tr>
+  <tr>
+    <td align="center"><strong>1. Painted source</strong><br>Colour marks the surfaces to texture.</td>
+    <td align="center"><strong>2. Original slice</strong><br>Paint becomes a costly second filament.</td>
+    <td align="center"><strong>3. Plain single colour</strong><br>The painted detail disappears.</td>
+    <td align="center"><strong>4. FuzzyPaint slice</strong><br>Painted regions become surface texture.</td>
+    <td align="center"><strong>5. Print-ready result</strong><br>Texture remains with zero filament changes.</td>
+  </tr>
+</table>
 
-Step 1 always retains the temporary colour painting required to build precise
-outline detours after slicing. Step 2 removes the resulting filament changes,
-purging and prime tower and produces the final single-filament print file.
+## What it does
 
-The 0.12.x source launcher and Windows package target Python 3.15.2. The Python
-application uses only the standard library; release builds bundle the PyO3
-0.30.1 Rust engine used by both preparation and G-code processing.
+- Converts selected painted filament slots into fuzzy-skin masks.
+- Retains the original colour painting by default, so existing multicolour
+  projects remain usable.
+- Protects large flat areas, narrow fitting surfaces, and related smooth
+  geometry from unwanted texture.
+- Uses Bambu Studio's installed slicer and the complete profiles already stored
+  in the project.
+- Rebuilds painted boundaries as physical inset outline detours.
+- Produces a print-ready `.gcode.3mf` with one model filament, no colour swaps,
+  and no prime tower.
+- Never overwrites the source project.
 
-## Command line
+## Quick start
+
+> [!IMPORTANT]
+> Start with a **3MF project** saved from Bambu Studio or OrcaSlicer. STL files
+> do not contain face-painting data.
+
+1. Download and extract the latest Windows release, then open
+   **Start FuzzyPaint.bat**.
+2. On **1 Prepare project**, select the colour-painted `.3mf`, choose a new
+   output filename, and enter the painted filament slot (for example `2` or
+   `2,4`). Use `all` to convert every painted slot.
+3. Leave **Keep large flat areas smooth** enabled when slots, mating faces,
+   recesses, or other dimensional surfaces must retain their fit.
+4. Normally keep the recommended retraction, wipe, sloped Z-hop, and attachment
+   cleanup options selected, then click **Prepare file for slicing**.
+5. On **2 Create single-filament file**, leave **Balanced — proven settings**
+   and **Both — complete outline** selected, then click
+   **Create single-filament print file**.
+6. Open the resulting `(FP-Print_Ready).gcode.3mf` in Bambu Studio and inspect
+   the complete Preview before printing.
+
+FuzzyPaint automatically runs the installed Bambu Studio slicer using the
+printer, filament, and process profiles embedded in the prepared project. The
+regular Bambu Studio window may remain open.
+
+For file naming, the manual slicing fallback, and an explanation of every
+stage, see the [complete workflow guide](WORKFLOW.md).
+
+## Recommended defaults
+
+The Windows GUI starts with settings chosen for the detailed single-filament
+workflow:
+
+- **Disable retractions** is enabled. FuzzyPaint sets the process fallback and
+  each virtual-filament override to zero before slicing.
+- **Disable wipe while retracting** is enabled. If retractions are turned back
+  on for a particular model or material, this remains independently togglable.
+- **Use sloped Z-hop for every filament** is enabled. This changes the lift
+  type while preserving the project's existing Z-hop heights.
+- **Keep large flat areas smooth** is enabled. The validated profile protects
+  large planar patches from 90 mm², compact strips from 30 mm², related
+  coplanar groups, flat contacts, and the neighbouring fuzz envelope.
+- Embedded guides and downloads are removed from the prepared copy; guides,
+  pictures, and downloads are removed from the final sliced file. Geometry,
+  thumbnails, and print-profile settings are retained.
+
+The slower disconnected-overlap and non-manifold-debris checks are available
+for difficult meshes but are off by default. Coincident-surface protection is
+experimental and also off by default.
+
+## Manual slicing fallback
+
+If automatic slicing is unavailable:
+
+1. Open the prepared project in Bambu Studio and slice it.
+2. Use **Print plate ▾ → Export plate sliced file**.
+3. Select the exported `.gcode.3mf` on FuzzyPaint's second tab.
+4. Create the final single-filament file and inspect it in Preview.
+
+Colour changes and a prime tower are expected in the intermediate sliced file;
+FuzzyPaint removes them in step 2.
+
+## Running from source
+
+The v0.12.0 source launcher and Windows package target Python 3.15.2. The Python
+application uses only the standard library. Release builds bundle the PyO3
+0.30.1 Rust engine used by both project preparation and G-code processing.
 
 ```powershell
 python fuzzypaint.py input.3mf output-fuzzy.3mf
@@ -76,50 +135,57 @@ python fuzzypaint.py input.3mf output-fuzzy.3mf --slots 2 --protect-planar
 python fuzzypaint.py input.3mf output-single.3mf --slots 2 --protect-planar --single-colour
 ```
 
+The command-line `--protect-planar` option uses its own 20 mm² threshold. The
+GUI applies the broader validated smooth-surface profile described above.
+
 ### Sliced-path outline detours
 
 `gcode_layer_interval_detour.py` operates on Bambu Studio's exported **plate
-sliced file** (`.gcode.3mf`). At cross-layer virtual-colour boundaries it reconstructs
-the affected outer-wall run as an explicit inward connector, a parallel inset
-span, and an outward connector. It then removes the slicer's colour changes and
-wipe tower and packages the result as a true single-filament sliced file.
+sliced file** (`.gcode.3mf`). At cross-layer virtual-colour boundaries, it
+reconstructs the affected outer-wall run as an inward connector, a parallel
+inset span, and an outward connector. It then removes the slicer's colour
+changes and wipe tower and packages the result as a true single-filament sliced
+file.
 
 ```powershell
 python gcode_layer_interval_detour.py input.gcode.3mf output-detour.gcode.3mf --inset 0.24 --boundary-resolution 0.10 --endpoint-coverage 0.21 --same-layer-gap 0 --detour-side both --detour-filaments 2
 ```
 
-This is a G-code postprocessor. Inspect the complete result in
-Bambu Studio Preview before printing; do not use it on an unsliced project 3MF.
+This is a G-code postprocessor. Do not use it on an unsliced project 3MF.
 
 ## Notes and limitations
 
 - Colour painting means Bambu's `paint_color` face data. Separate coloured
   model parts assigned to different filaments are not paint masks and are not
   converted.
-- On a triangle that already has fuzzy paint *and* colour paint, the converted
-  colour mask replaces that triangle's old fuzzy mask. Fuzzy paint on all other
-  triangles is left alone.
-- Planar protection groups adjacent selected triangles whose normals differ by
-  no more than 2°, and withholds fuzzy skin from connected patches measuring at
-  least 20 mm². It is optional because some designs may genuinely want fuzzy
-  skin on a large flat face.
-- Preparation and outline analysis are CPU operations. Release builds use the
-  bundled Rust engine for the normal mesh-protection and G-code workflows,
-  while retaining Python compatibility fallbacks. Bambu Studio slicing remains
-  a separate external operation; GPU acceleration is not currently used.
-- Apart from the explicitly selected options, the converter retains the
-  existing project and print-profile data. With the default retraction option
-  enabled, process and per-filament retraction lengths are set to zero before
-  slicing; retraction speed and tool-change values are retained. The default
-  wipe option changes the stored wipe-on-retraction switches. The default sloped
-  Z-hop option changes only the lift type and preserves all Z-hop heights.
-  Always verify the sliced preview before a long print.
+- On a triangle that already has fuzzy paint and colour paint, the converted
+  colour mask replaces that triangle's previous fuzzy mask. Fuzzy paint on all
+  other triangles is preserved.
+- Step 1 retains the temporary colour boundaries needed to construct accurate
+  outline detours. Step 2 removes the resulting filament changes, purging, and
+  prime tower.
 - The old two-virtual-filament/single-spool experiment is not exposed in the
-  GUI. Bambu Studio generates logical filament changes before the Send-window
-  AMS mapping, so mapping both colours to one tray cannot remove those changes.
+  GUI. Mapping both virtual colours to one AMS tray cannot remove logical
+  filament changes generated by the slicer.
+- Preparation and outline analysis are CPU operations. Release builds use the
+  bundled Rust engine; Bambu Studio slicing remains a separate external
+  operation. GPU acceleration is not currently used.
+
+> [!CAUTION]
+> FuzzyPaint changes project geometry settings and sliced toolpaths. Always
+> inspect the entire final Preview before sending a long print to the printer.
 
 ## Tests
 
 ```powershell
 & "$env:LOCALAPPDATA\Programs\Python\Python315\python.exe" -m unittest discover -s tests -v
 ```
+
+## Release notes
+
+v0.12.0 moves the Windows application and bundled Rust extension to Python
+3.15.2 and PyO3 0.30.1 without changing conversion defaults or output
+behaviour. It also reuses an existing Explorer window when that window already
+shows the exact output folder.
+
+See [CHANGELOG.md](CHANGELOG.md) for the complete history.
