@@ -48,7 +48,7 @@ else:
         fuzzypaint_engine = None
 
 
-APP_VERSION = "0.12.0"
+APP_VERSION = "0.12.1"
 SETTINGS_SCHEMA_VERSION = 2
 
 OUTPUT_SUBFOLDER_NAME = "FuzzyPaint Output"

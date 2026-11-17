@@ -10,7 +10,7 @@ The version bump happens in the same commit as the change it describes, not as a
 separate afterthought -- that's what let `APP_VERSION` drift and sit at 0.2.6
 through several real changes before this file existed.
 
-## 0.12.0
+## 0.12.1
 
 - Added an MIT software licence, packaged the licence notice with Windows
   builds, and exposed the full terms from the About window.
@@ -18,6 +18,9 @@ through several real changes before this file existed.
   window, including whether the bundled PyO3 Rust engine is active.
 - Added GitHub and licence buttons to the About window. The existing toolbar
   GitHub shortcut remains available.
+
+## 0.12.0
+
 - Migrated the Windows application and bundled Rust extension to Python 3.15.2
   and PyO3 0.30.1 without changing conversion defaults or output behaviour.
 - Reused an existing Explorer window when it already shows the exact output
