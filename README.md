@@ -45,6 +45,14 @@ their outlines to guide brush painting. Fine moss, weathering, fur, corrosion,
 stone variation, and similar painted details can become physical features that
 remain easy to identify when applying the final colours by hand.
 
+<div align="center">
+  <a href="docs/assets/hand-painted-example.jpg">
+    <img src="docs/assets/hand-painted-example.jpg" alt="Single-colour FuzzyPaint test piece painted by hand, with green textured moss, a brown vine, and dark stone" width="700">
+  </a>
+  <br>
+  <em>A single-filament FuzzyPaint test piece after hand painting. The converted paint mask gives the moss real texture and clear boundaries, making it straightforward to pick out in green while painting the vine and surrounding stone separately.</em>
+</div>
+
 ## See the difference
 
 Click any image for the full-size view. The linked gallery pages include
