@@ -36,6 +36,7 @@ Its towering ruins, stonework, vines, moss, and lava made it an irresistible mod
   <em>Relic Rush — the board game whose richly detailed terrain inspired FuzzyPaint. Click the image to view the original model on MakerWorld.</em>
 </div>
 
+<br>
 
 Printing it also exposed a gap in the normal workflow. Bambu Studio's colour
 painting showed exactly where the organic detail belonged; printing in one
