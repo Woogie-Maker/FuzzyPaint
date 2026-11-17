@@ -45,6 +45,17 @@ visible **previous** and **next** controls for stepping through the sequence.
   </tr>
 </table>
 
+## Example files
+
+Download the Bridge Tower example at either stage of the workflow:
+
+- [Prepared editable project (12.0 MiB)](<examples/Bridge Tower Plate (FP-Prepped).3mf>)
+- [Finished single-filament sliced file (54.0 MiB)](<examples/Bridge Tower Plate (FP-Print_Ready).gcode.3mf>)
+
+The prepared `.3mf` can be opened and sliced normally in Bambu Studio. The
+finished `.gcode.3mf` is already sliced: open it in Preview to inspect the
+single-filament result, but do not pass it through FuzzyPaint a second time.
+
 ## What it does
 
 - Converts selected painted filament slots into fuzzy-skin masks.
