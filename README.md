@@ -38,16 +38,18 @@ Its towering ruins, stonework, vines, moss, and lava made it an irresistible mod
 
 <br>
 
-Printing it also exposed a gap in the normal workflow. Bambu Studio's colour
-painting showed exactly where the organic detail belonged; printing in one
-colour lost that visual guide, while printing every painted region in a second
-filament introduced hundreds of colour changes, purge waste, and a prime
-tower, which result in hugely increased print times and filament usage.
+With the goal of printing it in a single colour and painting it by hand
+afterwards, I realised there was a gap in the normal workflow. Bambu Studio's
+colour painting showed exactly where every organic detail belonged, but that
+guidance disappeared when the model was sliced in one colour. Printing the
+painted regions in a second filament preserved the colour, but at the cost of
+hundreds of filament changes, substantial purge waste, a prime tower,
+dramatically longer print times, and far greater filament use.
 
-The app was initially created to solve that specific problem: turn the painted
-detail into real texture, retain its boundaries, and produce a practical
-single-filament model that could be painted by hand afterwards. The Bridge
-Tower examples below come directly from that original Relic Rush project.
+That gap led to FuzzyPaint: turn the painted detail into real texture, retain
+its boundaries, and produce a practical single-filament model ready for hand
+painting. The Bridge Tower examples below come directly from that original
+Relic Rush project.
 
 ## Print in one colour. Paint it by hand.
 
