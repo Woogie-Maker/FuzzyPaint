@@ -4,7 +4,7 @@
 
 # FuzzyPaint
 
-**Turn Bambu Studio colour painting into tactile surface detail — then create a true single-filament print.**
+**Turn Bambu Studio colour painting into tactile surface detail, print it in one filament, then paint the finished model by hand.**
 
 [![Release](https://img.shields.io/badge/release-v0.12.0-0969da?style=flat-square)](https://github.com/Woogie-Maker/FuzzyPaint/releases)
 [![Platform](https://img.shields.io/badge/platform-Windows-0078d4?style=flat-square)](#quick-start)
@@ -22,6 +22,28 @@ internally subdivided triangles.
 Its two-stage workflow can then preserve those painted-region boundaries as
 physical outline detours while removing colour changes, purging, and the prime
 tower from the final sliced file.
+
+## Print in one colour. Paint it by hand.
+
+A major use case for FuzzyPaint is producing **single-colour models designed
+for hand painting**. The colour painting you already created in Bambu Studio
+becomes a physical map on the print: selected regions gain texture, while the
+outline detours preserve their detailed boundaries.
+
+This gives you both parts of the original artistic intent after the filament
+colours are removed:
+
+- **A visible and tactile painting guide** showing where each painted region
+  belongs on the finished model.
+- **Real surface texture** that adds character after painting instead of
+  relying on colour alone.
+- **A practical single-filament print** without hundreds of colour changes,
+  purge waste, or a prime tower.
+
+Print the model in one suitable base colour, then use the textured regions and
+their outlines to guide brush painting. Fine moss, weathering, fur, corrosion,
+stone variation, and similar painted details can become physical features that
+remain easy to identify when applying the final colours by hand.
 
 ## See the difference
 
@@ -41,7 +63,7 @@ visible **previous** and **next** controls for stepping through the sequence.
     <td align="center"><strong>2. Original slice</strong><br>Paint becomes a costly second filament.</td>
     <td align="center"><strong>3. Plain single colour</strong><br>The painted detail disappears.</td>
     <td align="center"><strong>4. FuzzyPaint slice</strong><br>Painted regions become surface texture.</td>
-    <td align="center"><strong>5. Print-ready result</strong><br>Texture remains with zero filament changes.</td>
+    <td align="center"><strong>5. Ready to print and paint</strong><br>Texture guides hand painting with zero filament changes.</td>
   </tr>
 </table>
 
@@ -68,6 +90,8 @@ single-filament result, but do not pass it through FuzzyPaint a second time.
 - Rebuilds painted boundaries as physical inset outline detours.
 - Produces a print-ready `.gcode.3mf` with one model filament, no colour swaps,
   and no prime tower.
+- Turns digital colour painting into a visible and tactile guide for painting
+  the finished single-colour print by hand.
 - Never overwrites the source project.
 
 ## Quick start
@@ -90,6 +114,8 @@ single-filament result, but do not pass it through FuzzyPaint a second time.
    **Create single-filament print file**.
 6. Open the resulting `(FP-Print_Ready).gcode.3mf` in Bambu Studio and inspect
    the complete Preview before printing.
+7. Print with one filament, then use the retained texture and outline detail as
+   the guide for painting the finished model by hand.
 
 FuzzyPaint automatically runs the installed Bambu Studio slicer using the
 printer, filament, and process profiles embedded in the prepared project. The
