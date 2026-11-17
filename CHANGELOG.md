@@ -10,6 +10,16 @@ The version bump happens in the same commit as the change it describes, not as a
 separate afterthought -- that's what let `APP_VERSION` drift and sit at 0.2.6
 through several real changes before this file existed.
 
+## 0.12.2
+
+- Added the cropped FuzzyPaint artwork as the running window icon and the
+  multi-resolution Windows executable icon.
+- Added a prominent, underlined GitHub repository link near the top of the
+  About window. It is clickable and keyboard-accessible; the existing GitHub
+  buttons remain available.
+- Extended the packaged self-test to load and apply the bundled icon so a
+  release cannot silently omit it.
+
 ## 0.12.1
 
 - Added an MIT software licence, packaged the licence notice with Windows

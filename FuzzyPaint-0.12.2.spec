@@ -47,6 +47,7 @@ a = Analysis(
     datas=[
         (str(project_root / "LICENSE"), "."),
         (str(project_root / "ASSET_NOTICE.md"), "."),
+        (str(project_root / "assets" / "fuzzypaint-icon.png"), "assets"),
     ],
     hiddenimports=[],
     hookspath=[],
@@ -63,11 +64,12 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name="FuzzyPaint-0.12.1",
+    name="FuzzyPaint-0.12.2",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
     upx=True,
+    icon=str(project_root / "assets" / "fuzzypaint-icon.ico"),
     console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,
@@ -82,5 +84,5 @@ coll = COLLECT(
     strip=False,
     upx=True,
     upx_exclude=[],
-    name="FuzzyPaint-0.12.1",
+    name="FuzzyPaint-0.12.2",
 )

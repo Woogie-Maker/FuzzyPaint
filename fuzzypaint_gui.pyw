@@ -48,11 +48,12 @@ else:
         fuzzypaint_engine = None
 
 
-APP_VERSION = "0.12.1"
+APP_VERSION = "0.12.2"
 SETTINGS_SCHEMA_VERSION = 2
 
 OUTPUT_SUBFOLDER_NAME = "FuzzyPaint Output"
 GITHUB_URL = "https://github.com/Woogie-Maker/FuzzyPaint"
+APP_ICON_PATH = Path("assets") / "fuzzypaint-icon.png"
 MIT_LICENSE_TEXT = """MIT License
 
 Copyright (c) 2026 Woogie-Maker
@@ -74,6 +75,29 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE."""
+
+
+def resource_path(relative_path: Path) -> Path:
+    """Resolve a tracked resource in source checkouts and PyInstaller builds."""
+    bundle_root = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
+    return bundle_root / relative_path
+
+
+def create_repository_link(parent, background: str, command) -> tk.Label:
+    """Create the prominent mouse- and keyboard-accessible repository link."""
+    link = tk.Label(
+        parent,
+        text=GITHUB_URL,
+        foreground="#0563c1",
+        background=background,
+        cursor="hand2",
+        font=("Segoe UI", 10, "underline"),
+        takefocus=True,
+    )
+    link.bind("<Button-1>", lambda _event: command())
+    link.bind("<Return>", lambda _event: command())
+    link.bind("<space>", lambda _event: command())
+    return link
 
 CONFIG_DIR = Path(os.environ.get("APPDATA", str(Path.home()))) / "FuzzyPaint"
 SETTINGS_FILE = CONFIG_DIR / "settings.json"
@@ -325,6 +349,8 @@ class App(tk.Tk):
         # startup look substantially slower than it is.
         self.withdraw()
         self.title("FuzzyPaint")
+        self._window_icon = tk.PhotoImage(file=str(resource_path(APP_ICON_PATH)))
+        self.iconphoto(True, self._window_icon)
         self.minsize(800, 680)
         # Pin an explicit, centred position on the primary monitor instead of
         # leaving placement to Windows' own default-window-position heuristic,
@@ -1023,7 +1049,9 @@ class App(tk.Tk):
             font=("Segoe UI", 10),
             foreground="#555555",
             width=42,
-        ).pack(anchor="w", pady=(0, 12))
+        ).pack(anchor="w", pady=(0, 2))
+        repository_link = create_repository_link(body, window.cget("background"), self.open_github)
+        repository_link.pack(anchor="w", pady=(0, 12))
         help_text = (
             "# Why FuzzyPaint exists\n\n"
             "FuzzyPaint was created to add fuzzy skin only to the colour-painted areas of a model, "
@@ -1543,6 +1571,15 @@ if __name__ == "__main__":
         # Tk root withdrawn so the self-test does not flash a window.
         root = tk.Tk()
         root.withdraw()
+        test_icon = tk.PhotoImage(file=str(resource_path(APP_ICON_PATH)))
+        root.iconphoto(True, test_icon)
+        test_link = create_repository_link(root, root.cget("background"), lambda: None)
+        if test_link.cget("text") != GITHUB_URL:
+            raise SystemExit(3)
+        for event_name in ("<Button-1>", "<Return>", "<space>"):
+            if not test_link.bind(event_name):
+                raise SystemExit(3)
+        test_link.destroy()
         root.update_idletasks()
         root.destroy()
         if "--require-rust" in sys.argv and fuzzypaint_engine is None:
