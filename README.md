@@ -6,7 +6,7 @@
 
 **Turn Bambu Studio colour painting into tactile surface detail, print it in one filament, then paint the finished model by hand.**
 
-[![Release](https://img.shields.io/badge/release-v0.13.0-0969da?style=flat-square)](https://github.com/Woogie-Maker/FuzzyPaint/releases)
+[![Release](https://img.shields.io/badge/release-v0.14.0-0969da?style=flat-square)](https://github.com/Woogie-Maker/FuzzyPaint/releases)
 [![Platform](https://img.shields.io/badge/platform-Windows-0078d4?style=flat-square)](#quick-start)
 [![Python](https://img.shields.io/badge/Python-3.15.2-3776ab?style=flat-square)](#running-from-source)
 [![Rust](https://img.shields.io/badge/engine-Rust_2024-dea584?style=flat-square&logo=rust&logoColor=black)](#architecture)
@@ -213,7 +213,7 @@ FuzzyPaint removes them in step 2.
 
 ## Running from source
 
-The v0.13.0 source launcher and Windows package target Python 3.15.2. The Python
+The v0.14.0 source launcher and Windows package target Python 3.15.2. The Python
 application uses only the standard library. Release builds bundle the PyO3
 0.30.1 Rust engine used by both project preparation and G-code processing.
 
@@ -280,6 +280,9 @@ see [ASSET_NOTICE.md](ASSET_NOTICE.md) for details. Bundled third-party
 components retain their respective licences.
 
 ## Release notes
+
+v0.14.0 gives the About header short, readable `FuzzyPaint-GitHub` and
+`Woogie@MakerWorld` links instead of displaying a raw URL.
 
 v0.13.0 adds a large FuzzyPaint logo to About and silently creates or refreshes
 a per-user Start Menu shortcut whenever the packaged application launches. The

@@ -49,11 +49,12 @@ else:
         fuzzypaint_engine = None
 
 
-APP_VERSION = "0.13.0"
+APP_VERSION = "0.14.0"
 SETTINGS_SCHEMA_VERSION = 2
 
 OUTPUT_SUBFOLDER_NAME = "FuzzyPaint Output"
 GITHUB_URL = "https://github.com/Woogie-Maker/FuzzyPaint"
+MAKERWORLD_URL = "https://makerworld.com/en/@Woogie"
 APP_ICON_PATH = Path("assets") / "fuzzypaint-icon.png"
 MIT_LICENSE_TEXT = """MIT License
 
@@ -84,11 +85,11 @@ def resource_path(relative_path: Path) -> Path:
     return bundle_root / relative_path
 
 
-def create_repository_link(parent, background: str, command) -> tk.Label:
-    """Create the prominent mouse- and keyboard-accessible repository link."""
+def create_about_link(parent, text: str, background: str, command) -> tk.Label:
+    """Create a prominent mouse- and keyboard-accessible About link."""
     link = tk.Label(
         parent,
-        text=GITHUB_URL,
+        text=text,
         foreground="#0563c1",
         background=background,
         cursor="hand2",
@@ -1073,6 +1074,9 @@ class App(tk.Tk):
     def open_github(self) -> None:
         webbrowser.open(GITHUB_URL)
 
+    def open_makerworld(self) -> None:
+        webbrowser.open(MAKERWORLD_URL)
+
     def show_license(self) -> None:
         show_message(self, "FuzzyPaint — MIT License", MIT_LICENSE_TEXT)
 
@@ -1124,10 +1128,16 @@ class App(tk.Tk):
             foreground="#555555",
             width=42,
         ).pack(anchor="w", pady=(0, 2))
-        repository_link = create_repository_link(
-            header_text, window.cget("background"), self.open_github
+        link_row = ttk.Frame(header_text)
+        link_row.pack(anchor="w", pady=(0, 12))
+        repository_link = create_about_link(
+            link_row, "FuzzyPaint-GitHub", window.cget("background"), self.open_github
         )
-        repository_link.pack(anchor="w", pady=(0, 12))
+        repository_link.pack(side="left")
+        makerworld_link = create_about_link(
+            link_row, "Woogie@MakerWorld", window.cget("background"), self.open_makerworld
+        )
+        makerworld_link.pack(side="left", padx=(14, 0))
         self._about_logo = self._window_icon.subsample(5, 5)
         ttk.Label(header, image=self._about_logo).pack(side="right", padx=(18, 8), pady=(0, 8))
         help_text = (
@@ -1651,13 +1661,16 @@ if __name__ == "__main__":
         root.withdraw()
         test_icon = tk.PhotoImage(file=str(resource_path(APP_ICON_PATH)))
         root.iconphoto(True, test_icon)
-        test_link = create_repository_link(root, root.cget("background"), lambda: None)
-        if test_link.cget("text") != GITHUB_URL:
-            raise SystemExit(3)
-        for event_name in ("<Button-1>", "<Return>", "<space>"):
-            if not test_link.bind(event_name):
+        for label in ("FuzzyPaint-GitHub", "Woogie@MakerWorld"):
+            test_link = create_about_link(
+                root, label, root.cget("background"), lambda: None
+            )
+            if test_link.cget("text") != label:
                 raise SystemExit(3)
-        test_link.destroy()
+            for event_name in ("<Button-1>", "<Return>", "<space>"):
+                if not test_link.bind(event_name):
+                    raise SystemExit(3)
+            test_link.destroy()
         root.update_idletasks()
         root.destroy()
         if "--require-rust" in sys.argv and fuzzypaint_engine is None:

@@ -10,6 +10,13 @@ The version bump happens in the same commit as the change it describes, not as a
 separate afterthought -- that's what let `APP_VERSION` drift and sit at 0.2.6
 through several real changes before this file existed.
 
+## 0.14.0
+
+- Replaced the raw GitHub URL in the About header with the clearer
+  `FuzzyPaint-GitHub` label.
+- Added a neighbouring `Woogie@MakerWorld` link to the creator's MakerWorld
+  profile. Both links are clickable and keyboard-accessible.
+
 ## 0.13.0
 
 - Added a large FuzzyPaint logo to the About window header.
