@@ -64,7 +64,7 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name="FuzzyPaint-0.12.2",
+    name="FuzzyPaint-0.13.0",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -84,5 +84,5 @@ coll = COLLECT(
     strip=False,
     upx=True,
     upx_exclude=[],
-    name="FuzzyPaint-0.12.2",
+    name="FuzzyPaint-0.13.0",
 )

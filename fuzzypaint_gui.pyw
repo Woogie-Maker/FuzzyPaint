@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import ctypes
 import hashlib
 import json
@@ -48,7 +49,7 @@ else:
         fuzzypaint_engine = None
 
 
-APP_VERSION = "0.12.2"
+APP_VERSION = "0.13.0"
 SETTINGS_SCHEMA_VERSION = 2
 
 OUTPUT_SUBFOLDER_NAME = "FuzzyPaint Output"
@@ -98,6 +99,65 @@ def create_repository_link(parent, background: str, command) -> tk.Label:
     link.bind("<Return>", lambda _event: command())
     link.bind("<space>", lambda _event: command())
     return link
+
+
+def create_windows_shortcut(shortcut_path: Path, executable_path: Path) -> None:
+    """Create or refresh a Windows shell link without an installer."""
+    shortcut_path.parent.mkdir(parents=True, exist_ok=True)
+
+    def ps_quote(value: str) -> str:
+        return "'" + value.replace("'", "''") + "'"
+
+    script = "\n".join(
+        (
+            "$shell = New-Object -ComObject WScript.Shell",
+            f"$shortcut = $shell.CreateShortcut({ps_quote(str(shortcut_path))})",
+            f"$shortcut.TargetPath = {ps_quote(str(executable_path))}",
+            f"$shortcut.WorkingDirectory = {ps_quote(str(executable_path.parent))}",
+            f"$shortcut.IconLocation = {ps_quote(f'{executable_path},0')}",
+            "$shortcut.Description = 'FuzzyPaint for Bambu Studio'",
+            "$shortcut.Save()",
+        )
+    )
+    encoded_script = base64.b64encode(script.encode("utf-16le")).decode("ascii")
+    subprocess.run(
+        (
+            "powershell.exe",
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-WindowStyle",
+            "Hidden",
+            "-EncodedCommand",
+            encoded_script,
+        ),
+        check=True,
+        capture_output=True,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+    )
+
+
+def ensure_start_menu_shortcut() -> None:
+    """Silently create the per-user Start Menu shortcut for packaged builds."""
+    if os.name != "nt" or not getattr(sys, "frozen", False):
+        return
+    appdata = os.environ.get("APPDATA")
+    if not appdata:
+        return
+    shortcut_path = (
+        Path(appdata)
+        / "Microsoft"
+        / "Windows"
+        / "Start Menu"
+        / "Programs"
+        / "FuzzyPaint.lnk"
+    )
+    try:
+        create_windows_shortcut(shortcut_path, Path(sys.executable).resolve())
+    except (OSError, subprocess.SubprocessError):
+        # Shortcut creation must never prevent the portable application from
+        # opening, including on restricted corporate Windows installations.
+        pass
 
 CONFIG_DIR = Path(os.environ.get("APPDATA", str(Path.home()))) / "FuzzyPaint"
 SETTINGS_FILE = CONFIG_DIR / "settings.json"
@@ -1031,12 +1091,26 @@ class App(tk.Tk):
         window.transient(self)
         body = ttk.Frame(window, padding=18)
         body.pack(fill="both", expand=True)
-        SelectableLabel(body, text="FuzzyPaint", font=("Segoe UI", 18, "bold"), width=12).pack(anchor="w")
+        header = ttk.Frame(body)
+        header.pack(fill="x")
+        header_text = ttk.Frame(header)
+        header_text.pack(side="left", fill="x", expand=True)
         SelectableLabel(
-            body, text="for Bambu Studio", font=("Segoe UI", 12), foreground="#555555", width=20
+            header_text, text="FuzzyPaint", font=("Segoe UI", 18, "bold"), width=12
         ).pack(anchor="w")
         SelectableLabel(
-            body, text=f"Version {APP_VERSION}", font=("Segoe UI", 12), foreground="#555555", width=20
+            header_text,
+            text="for Bambu Studio",
+            font=("Segoe UI", 12),
+            foreground="#555555",
+            width=20,
+        ).pack(anchor="w")
+        SelectableLabel(
+            header_text,
+            text=f"Version {APP_VERSION}",
+            font=("Segoe UI", 12),
+            foreground="#555555",
+            width=20,
         ).pack(anchor="w", pady=(1, 2))
         engine_status = (
             "Rust engine active via PyO3"
@@ -1044,14 +1118,18 @@ class App(tk.Tk):
             else "Python compatibility mode"
         )
         SelectableLabel(
-            body,
+            header_text,
             text=f"Python interface · {engine_status}",
             font=("Segoe UI", 10),
             foreground="#555555",
             width=42,
         ).pack(anchor="w", pady=(0, 2))
-        repository_link = create_repository_link(body, window.cget("background"), self.open_github)
+        repository_link = create_repository_link(
+            header_text, window.cget("background"), self.open_github
+        )
         repository_link.pack(anchor="w", pady=(0, 12))
+        self._about_logo = self._window_icon.subsample(5, 5)
+        ttk.Label(header, image=self._about_logo).pack(side="right", padx=(18, 8), pady=(0, 8))
         help_text = (
             "# Why FuzzyPaint exists\n\n"
             "FuzzyPaint was created to add fuzzy skin only to the colour-painted areas of a model, "
@@ -1586,4 +1664,5 @@ if __name__ == "__main__":
             raise SystemExit(2)
         raise SystemExit(0)
     _declare_dpi_aware()
+    ensure_start_menu_shortcut()
     App().mainloop()

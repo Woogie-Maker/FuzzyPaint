@@ -10,6 +10,16 @@ The version bump happens in the same commit as the change it describes, not as a
 separate afterthought -- that's what let `APP_VERSION` drift and sit at 0.2.6
 through several real changes before this file existed.
 
+## 0.13.0
+
+- Added a large FuzzyPaint logo to the About window header.
+- Packaged Windows builds now silently create or refresh a per-user
+  `FuzzyPaint.lnk` in the Start Menu on normal launch. This uses Windows'
+  built-in shell-link COM support, requires no installer or administrator
+  access, and always points to the currently launched executable.
+- Kept the app portable: shortcut creation is skipped for source runs and any
+  failure on a restricted Windows installation does not prevent startup.
+
 ## 0.12.2
 
 - Added the cropped FuzzyPaint artwork as the running window icon and the
