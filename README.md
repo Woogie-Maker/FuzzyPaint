@@ -23,6 +23,22 @@ Its two-stage workflow can then preserve those painted-region boundaries as
 physical outline detours while removing colour changes, purging, and the prime
 tower from the final sliced file.
 
+## Why FuzzyPaint exists
+
+FuzzyPaint began with a real printing project: the beautifully designed
+[Relic Rush board game on MakerWorld](https://makerworld.com/en/models/2046733-relic-rush-board-game#profileId-2208645).
+Its towering ruins, stonework, vines, moss, and lava made it an irresistible
+model to print, but they also exposed a gap in the normal workflow. Bambu
+Studio's colour painting showed exactly where the organic detail belonged;
+printing in one colour lost that visual guide, while printing every painted
+region in a second filament introduced hundreds of colour changes, purge
+waste, and a prime tower.
+
+The app was initially created to solve that specific problem: turn the painted
+detail into real texture, retain its boundaries, and produce a practical
+single-filament model that could be painted by hand afterwards. The Bridge
+Tower examples below come directly from that original Relic Rush project.
+
 ## Print in one colour. Paint it by hand.
 
 A major use case for FuzzyPaint is producing **single-colour models designed
