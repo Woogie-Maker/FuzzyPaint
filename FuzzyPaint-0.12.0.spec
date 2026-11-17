@@ -44,7 +44,10 @@ a = Analysis(
     # shadow the bundled .pyd at runtime.
     pathex=[str(engine_extension.parent)],
     binaries=[(str(engine_extension), ".")],
-    datas=[],
+    datas=[
+        (str(project_root / "LICENSE"), "."),
+        (str(project_root / "ASSET_NOTICE.md"), "."),
+    ],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},

@@ -53,6 +53,27 @@ SETTINGS_SCHEMA_VERSION = 2
 
 OUTPUT_SUBFOLDER_NAME = "FuzzyPaint Output"
 GITHUB_URL = "https://github.com/Woogie-Maker/FuzzyPaint"
+MIT_LICENSE_TEXT = """MIT License
+
+Copyright (c) 2026 Woogie-Maker
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE."""
 
 CONFIG_DIR = Path(os.environ.get("APPDATA", str(Path.home()))) / "FuzzyPaint"
 SETTINGS_FILE = CONFIG_DIR / "settings.json"
@@ -966,6 +987,9 @@ class App(tk.Tk):
     def open_github(self) -> None:
         webbrowser.open(GITHUB_URL)
 
+    def show_license(self) -> None:
+        show_message(self, "FuzzyPaint — MIT License", MIT_LICENSE_TEXT)
+
     def show_help(self) -> None:
         existing = getattr(self, "_help_window", None)
         if existing is not None and existing.winfo_exists():
@@ -987,7 +1011,19 @@ class App(tk.Tk):
         ).pack(anchor="w")
         SelectableLabel(
             body, text=f"Version {APP_VERSION}", font=("Segoe UI", 12), foreground="#555555", width=20
-        ).pack(anchor="w", pady=(1, 12))
+        ).pack(anchor="w", pady=(1, 2))
+        engine_status = (
+            "Rust engine active via PyO3"
+            if fuzzypaint_engine is not None
+            else "Python compatibility mode"
+        )
+        SelectableLabel(
+            body,
+            text=f"Python interface · {engine_status}",
+            font=("Segoe UI", 10),
+            foreground="#555555",
+            width=42,
+        ).pack(anchor="w", pady=(0, 12))
         help_text = (
             "# Why FuzzyPaint exists\n\n"
             "FuzzyPaint was created to add fuzzy skin only to the colour-painted areas of a model, "
@@ -1032,7 +1068,14 @@ class App(tk.Tk):
             "Bambu stores colour and fuzzy painting as per-triangle masks inside the 3MF. The first step "
             "copies selected colour-mask regions into the fuzzy-skin mask. The second step analyses outer-wall "
             "toolpaths in exported G-code, inserts inward detours at colour boundaries, and collapses the job "
-            "to one physical filament. Other project and print-profile data is retained."
+            "to one physical filament. Other project and print-profile data is retained.\n\n"
+            "The interface and workflow are written in Python. Performance-sensitive mesh protection and "
+            "G-code processing use the bundled Rust 2024 engine through PyO3, with Python compatibility "
+            "fallbacks available when running from source.\n\n"
+            "## Licence and source code\n\n"
+            "FuzzyPaint is open-source software licensed under the MIT License. Use View License below for "
+            "the complete terms, or open the GitHub repository to view the source code, report issues, and "
+            "download current releases."
         )
         text_frame = ttk.Frame(body)
         text_frame.pack(fill="both", expand=True)
@@ -1051,7 +1094,11 @@ class App(tk.Tk):
         text.configure(state="disabled")
         text.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
-        ttk.Button(body, text="Close", command=window.destroy).pack(anchor="e", pady=(8, 0))
+        button_row = ttk.Frame(body)
+        button_row.pack(fill="x", pady=(8, 0))
+        ttk.Button(button_row, text="View on GitHub", command=self.open_github).pack(side="left")
+        ttk.Button(button_row, text="View MIT License", command=self.show_license).pack(side="left", padx=(8, 0))
+        ttk.Button(button_row, text="Close", command=window.destroy).pack(side="right")
 
     def _apply_preset(self) -> None:
         values = PRESETS.get(self.gcode_preset.get())

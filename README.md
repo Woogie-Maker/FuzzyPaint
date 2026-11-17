@@ -9,6 +9,8 @@
 [![Release](https://img.shields.io/badge/release-v0.12.0-0969da?style=flat-square)](https://github.com/Woogie-Maker/FuzzyPaint/releases)
 [![Platform](https://img.shields.io/badge/platform-Windows-0078d4?style=flat-square)](#quick-start)
 [![Python](https://img.shields.io/badge/Python-3.15.2-3776ab?style=flat-square)](#running-from-source)
+[![Rust](https://img.shields.io/badge/engine-Rust_2024-dea584?style=flat-square&logo=rust&logoColor=black)](#architecture)
+[![License](https://img.shields.io/badge/license-MIT-f5c518?style=flat-square)](LICENSE)
 
 [Download the latest release](https://github.com/Woogie-Maker/FuzzyPaint/releases) · [Workflow guide](WORKFLOW.md) · [Changelog](CHANGELOG.md)
 
@@ -129,6 +131,21 @@ single-filament result, but do not pass it through FuzzyPaint a second time.
 - Turns digital colour painting into a visible and tactile guide for painting
   the finished single-colour print by hand.
 - Never overwrites the source project.
+
+## Architecture
+
+FuzzyPaint is a hybrid Python and Rust application:
+
+- The Windows interface, project workflow, Bambu Studio integration, and
+  compatibility paths are written in Python 3.15 using the standard library
+  and Tkinter.
+- Performance-sensitive mesh protection and G-code processing run in a bundled
+  Rust 2024 engine connected to Python through PyO3 0.30.1.
+- Python fallbacks remain available when running from source without a
+  compatible compiled Rust extension.
+
+This keeps the application easy to run and inspect while moving the expensive
+geometry and toolpath work into native code.
 
 ## Quick start
 
@@ -253,6 +270,14 @@ This is a G-code postprocessor. Do not use it on an unsliced project 3MF.
 ```powershell
 & "$env:LOCALAPPDATA\Programs\Python\Python315\python.exe" -m unittest discover -s tests -v
 ```
+
+## Licence
+
+FuzzyPaint's source code and original documentation are available under the
+[MIT License](LICENSE). Third-party and Relic Rush-derived example files,
+screenshots, and imagery are not covered by the FuzzyPaint software licence;
+see [ASSET_NOTICE.md](ASSET_NOTICE.md) for details. Bundled third-party
+components retain their respective licences.
 
 ## Release notes
 

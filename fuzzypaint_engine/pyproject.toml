@@ -5,6 +5,8 @@ build-backend = "maturin"
 [project]
 name = "fuzzypaint_engine"
 requires-python = ">=3.15"
+license = "MIT"
+urls = { Repository = "https://github.com/Woogie-Maker/FuzzyPaint" }
 classifiers = [
     "Programming Language :: Rust",
     "Programming Language :: Python :: Implementation :: CPython",

@@ -12,6 +12,12 @@ through several real changes before this file existed.
 
 ## 0.12.0
 
+- Added an MIT software licence, packaged the licence notice with Windows
+  builds, and exposed the full terms from the About window.
+- Identified the Python/Rust architecture prominently in the README and About
+  window, including whether the bundled PyO3 Rust engine is active.
+- Added GitHub and licence buttons to the About window. The existing toolbar
+  GitHub shortcut remains available.
 - Migrated the Windows application and bundled Rust extension to Python 3.15.2
   and PyO3 0.30.1 without changing conversion defaults or output behaviour.
 - Reused an existing Explorer window when it already shows the exact output
