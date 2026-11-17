@@ -14,9 +14,9 @@
 
 </div>
 
-FuzzyPaint converts filament colour painting in a Bambu Studio or OrcaSlicer
-`.3mf` project into fuzzy-skin painting. It works directly with the
-per-triangle paint masks, preserving fine brush boundaries and Bambu's
+FuzzyPaint converts filament colour painting in a Bambu Studio or OrcaSlicer project into fuzzy-skin painting.
+
+It works directly with the per-triangle paint masks, preserving fine brush boundaries and Bambu's
 internally subdivided triangles.
 
 Its two-stage workflow can then preserve those painted-region boundaries as
